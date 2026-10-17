@@ -15,6 +15,7 @@ use commands::tags::{
     create_tagging_rule, get_tagging_rules, update_tagging_rule, delete_tagging_rule,
     run_tagging_rules,
 };
+use services::demo_data;
 use state::AppState;
 use tauri::Manager;
 use log::{info, warn};
@@ -31,11 +32,10 @@ pub fn run() {
         .setup(|app| {
             info!("App setup: Initializing services...");
 
-            // Get app data directory
-            let app_data_dir = app
-                .path()
-                .app_data_dir()
-                .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+            // Resolve the data directory (in demo mode this is a separate
+            // `demo/` subdirectory, so real data is never touched)
+            let demo_mode = demo_data::is_demo_mode();
+            let app_data_dir = demo_data::resolve_data_dir(app.handle())?;
 
             // Clone for later use
             let app_data_dir_clone = app_data_dir.clone();
@@ -44,11 +44,36 @@ pub fn run() {
             let app_state = AppState::new(app_data_dir)
                 .map_err(|e| format!("Failed to initialize AppState: {}", e))?;
 
+            if demo_mode {
+                info!(
+                    "App setup: Demo data mode is active ({}={}); using {} and skipping account/sync initialization",
+                    demo_data::DEMO_DATA_ENV_VAR,
+                    demo_data::DEMO_DATA_ENV_ENABLED_VALUE,
+                    app_data_dir_clone.display()
+                );
+                app_state.preload_accounts(demo_data::demo_account_configs());
+
+                // Nothing else holds the database yet, so a non-blocking lock suffices.
+                let database = app_state
+                    .database
+                    .try_lock()
+                    .map_err(|e| format!("Failed to lock database for demo seeding: {}", e))?;
+                let seed_summary = demo_data::seed_demo_data(&database)
+                    .map_err(|e| format!("Failed to seed demo data: {}", e))?;
+                drop(database);
+                info!("App setup: Demo data: {}", seed_summary);
+            }
+
             // Store AppState in Tauri state
             app.manage(app_state);
             app.manage(MemoryState::new());
 
             info!("App setup: Services initialized");
+
+            // Demo mode has no real credentials: never register providers or start sync.
+            if demo_mode {
+                return Ok(());
+            }
 
             // Initialize sync service in the background
             let app_handle = app.handle().clone();

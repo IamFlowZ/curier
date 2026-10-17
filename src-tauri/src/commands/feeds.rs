@@ -148,7 +148,7 @@ pub async fn fetch_feed_emails(
 }
 
 /// Execute a feed query with criteria filtering
-fn execute_feed_query(
+pub(crate) fn execute_feed_query(
     db: &crate::services::database::DatabaseService,
     feed: &Feed,
     page: u32,
@@ -214,7 +214,7 @@ fn execute_feed_query(
 }
 
 /// Build a WHERE clause from filter criteria
-fn build_criteria_where_clause(
+pub(crate) fn build_criteria_where_clause(
     criteria: &[FilterCriterion],
     match_mode: &str,
     account_scope: &Option<String>,

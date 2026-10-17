@@ -10,7 +10,7 @@ use crate::state::AppState;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::RwLock;
 use log::{debug, info, warn};
@@ -150,10 +150,7 @@ fn sanitize_email_html(html: &str) -> String {
 }
 
 fn get_app_data_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
-    app_handle
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to get app data dir: {}", e))
+    crate::services::demo_data::resolve_data_dir(app_handle)
 }
 
 /// Helper to get OAuth config for a specific account
@@ -951,8 +948,7 @@ pub async fn import_emails(
         return Ok(0);
     }
 
-    let app_data_dir = app_handle.path().app_data_dir()
-        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let app_data_dir = get_app_data_dir(&app_handle)?;
 
     // Resolve the provider for this account
     let provider = {

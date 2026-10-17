@@ -151,6 +151,19 @@ impl AppState {
         Ok(cache.accounts.get(account_id).cloned())
     }
 
+    /// Replace the account cache with the given configs and mark it loaded, so
+    /// no later call consults the credential store. Used by demo mode to run
+    /// with fake accounts that have no Keychain entry.
+    pub fn preload_accounts(&self, configs: Vec<(String, OAuthConfig)>) {
+        let mut cache = self.multi_account_cache.lock().unwrap();
+        cache.accounts.clear();
+        for (account_id, config) in configs {
+            info!("AppState: Preloading account (no credential store): {}", account_id);
+            cache.accounts.insert(account_id, config);
+        }
+        cache.loaded = true;
+    }
+
     /// Set OAuth config for a specific account
     pub fn set_account_config(&self, account_id: &str, config: OAuthConfig) {
         debug!("AppState: set_account_config for account: {}", account_id);

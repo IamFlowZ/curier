@@ -8,3 +8,4 @@ pub mod credential_store;
 pub mod settings;
 pub mod rule_engine;
 pub mod sync;
+pub mod demo_data;

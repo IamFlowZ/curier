@@ -8,7 +8,7 @@ use crate::state::AppState;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 use log::{debug, info, warn};
 
 const GOOGLE_CREDENTIALS_FILENAME: &str = "google_credentials.json";
@@ -20,10 +20,7 @@ const MICROSOFT_PLACEHOLDER_ACCOUNT: &str = "pending@microsoft.oauth.temp";
 const MICROSOFT_GRAPH_ME_URL: &str = "https://graph.microsoft.com/v1.0/me";
 
 fn get_app_data_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
-    app_handle
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to get app data dir: {}", e))
+    crate::services::demo_data::resolve_data_dir(app_handle)
 }
 
 #[derive(Serialize)]
