@@ -20,16 +20,11 @@ Your OAuth consent screen may not be configured correctly, or the Gmail address 
 3. Under **Test users**, add the Gmail address you're trying to connect
 4. Try again in Curier
 
-### "Address already in use" (Error 48)
+### Login hangs or times out
 
-Port 8080 is in use by another process. Curier needs this port for the OAuth callback.
+Curier listens on a random free port on `127.0.0.1` for the OAuth callback, so port conflicts are not a cause. The consent flow must finish within 5 minutes; if you declined in the browser, Curier reports it immediately.
 
-**Fix:**
-```bash
-lsof -ti:8080 | xargs kill -9
-```
-
-Then try connecting again.
+**Fix:** close the browser tab, return to Curier, and start the login again. If a firewall or privacy tool blocks loopback connections from the browser, allow `127.0.0.1`.
 
 ### "CSRF token mismatch"
 
@@ -130,7 +125,7 @@ npm run tauri dev
 ## Still Stuck?
 
 1. Run the setup verification script: `./scripts/verify-gmail-setup.sh`
-2. Check [GitHub Issues](https://github.com/yourusername/curier/issues) — someone may have hit the same problem
+2. Check [GitHub Issues](https://github.com/IamFlowZ/curier/issues) — someone may have hit the same problem
 3. Open a new issue with:
    - Your macOS version
    - The error message (screenshot or text)

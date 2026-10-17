@@ -88,7 +88,7 @@ If you want to disconnect Curier from your Gmail:
 Google requires apps that access Gmail to go through a paid security review before they can be used publicly. Since Curier is a free, open-source project, we let each user create their own credentials instead. This also means your data flows directly between your computer and Google — no third-party servers involved.
 
 **Is this safe?**
-Yes. Your Client ID and Client Secret are stored locally in your macOS Keychain. The OAuth flow uses PKCE, which is the industry standard for desktop apps. Curier only requests read-only access to your email.
+Yes. Your Client ID and Client Secret are stored locally in your macOS Keychain. The OAuth flow uses PKCE, which is the industry standard for desktop apps. Curier requests read-only access plus permission to send mail (`gmail.readonly` and `gmail.send`); it cannot modify or delete anything in your mailbox.
 
 **What if I see a "This app isn't verified" warning?**
 This is expected. Since your app is in testing mode, Google shows this warning. Click **Advanced** → **Go to Curier (unsafe)** to continue. Despite the scary language, this is safe — you created the app yourself and you're the only user.

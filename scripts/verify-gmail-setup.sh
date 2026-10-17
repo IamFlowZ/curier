@@ -92,7 +92,7 @@ RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
     -d "client_secret=$CLIENT_SECRET" \
     -d "grant_type=authorization_code" \
     -d "code=fake_code_for_validation" \
-    -d "redirect_uri=http://127.0.0.1:8080" \
+    -d "redirect_uri=http://127.0.0.1" \
     2>/dev/null || echo "000")
 
 if [[ "$RESPONSE" == "000" ]]; then
@@ -130,18 +130,6 @@ else
     pass "Gmail API endpoint responded ($GMAIL_RESPONSE)"
 fi
 
-# ── Step 6: Check port 8080 ──
-echo ""
-echo -e "${BOLD}6. Checking port 8080 (OAuth callback)${NC}"
-
-if lsof -i :8080 &> /dev/null; then
-    warn "Port 8080 is currently in use — this may interfere with the OAuth callback"
-    info "Run this to free it: lsof -ti:8080 | xargs kill -9"
-    ERRORS=$((ERRORS + 1))
-else
-    pass "Port 8080 is available"
-fi
-
 # ── Summary ──
 echo ""
 echo "─────────────────────────────────────"
@@ -151,7 +139,7 @@ if [[ $ERRORS -eq 0 ]]; then
     echo ""
     echo "  Next steps:"
     echo "  1. Open Curier"
-    echo "  2. Enter your Client ID, Client Secret, and Gmail address"
+    echo "  2. Enter your Client ID and Client Secret"
     echo "  3. Click 'Connect Gmail' and authorize in your browser"
 else
     echo -e "${RED}${BOLD}$ERRORS issue(s) found.${NC} Review the errors above before connecting."

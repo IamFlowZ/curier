@@ -7,10 +7,22 @@
 </p>
 
 <p align="center">
-  <strong>~12MB RAM</strong> &nbsp;·&nbsp; Multi-account &nbsp;·&nbsp; Modern UI &nbsp;·&nbsp; Native performance
+  Multi-account &nbsp;·&nbsp; Modern UI &nbsp;·&nbsp; Native performance
 </p>
 
 ---
+## Foreword
+Like many other builders, I've spent an exorbitant amount of time learning and playing with AI tools over the past couple of years. Personally I noticed a significant shift in the capabilities of these tools after attending last years Re:Invent conference. Prior to that I'd been using Cursor and was operating mostly in an "augmented developer" mode. Which at the time was great. But coming back after the holidays, I started to segway more into claude code and agentic engineering, and it became apparent to me that there where limits that needed to be tested. So this project is the result of me, testing those limits. 
+
+This project originated from me attempting to vibe-code an email app from scratch, in an ecosystem I didn't know. Looking through my prior projects, it's pretty easy to see that my specialty lies mostly on the web. Not in native app development. A tauri app with a react/tailwind ui over the top is where I landed. Even to this day after months of usage, I can confidently say I don't know rust and I haven't written a line of code in here.
+
+I daily drive this app for my personal emails and I stand by it for what it is. A vibe-coded app. It has lots of worts and design choices that others would scoff at. But I would whole-heartedly say that it's improved my digital well-being. It provides an interface that makes it easy to quickly parse my emails as if they were a social media feed, along with some simple tooling for replying to emails where need-be. 
+
+I've waited this long because I've been unsure wether or not anyone would be interested in a project like this. And because I'm not sure how I feel releasing a code base that I didn't author. But I think this is a part of our collective future, the industrialization of software. meaning not every line of every piece of software needs to be handcrafted anymore. So if you're like me and you want a "lightweight" native app to parse your emails in a more sane format beyond a chronological feed, this is for you. If you're looking for an enterprise-grade email client with fancy features and reliability of a thousand on-call devs, this is not the product for you.
+
+If anyone does see this, I am still using it lol. If you'd like to request changes or include changes of your own all the traditional knobs and levers are open. Considering this is made from the crunched up dust of the Library of Alexandria, it only makes sense for me to turn it back out into the world right?
+
+- Dakota
 
 ## Why Curier?
 
@@ -18,16 +30,10 @@ Most modern email clients are built on Electron and consume 300–500MB of RAM j
 
 Curier takes a different approach: a **Rust backend** for speed and safety, a **React frontend** for a modern UI, and **Tauri** to bridge them — all in a package that uses a fraction of the memory.
 
-| Client | RAM Usage | Open Source |
-|---|---|---|
-| Mailspring | 300–500MB | Partial |
-| Thunderbird | 200–400MB | Yes |
-| Apple Mail | ~100MB | No |
-| **Curier** | **~12MB** | **Yes** |
 
 ## Features
 
-- **Lightweight** — runs at ~12MB RAM, well under the 150MB ceiling it was designed for
+- **Lightweight**
 - **Multi-account** — manage multiple Gmail accounts from a single window
 - **Tabbed interface** — open emails, compose windows, and account views in tabs
 - **Feeds view** — browse newsletters and subscriptions in a dedicated feed layout
@@ -36,26 +42,6 @@ Curier takes a different approach: a **Rust backend** for speed and safety, a **
 - **Secure auth** — OAuth2 PKCE flow with credentials stored in the macOS Keychain
 - **HTML email rendering** — sanitized with `ammonia` for safe viewing
 - **SQLite storage** — local email cache for fast offline browsing
-
-## Screenshots
-
-<p align="center">
-  <img src="docs/screenshots/inbox.png" alt="Inbox view with multi-account support" width="700" />
-  <br />
-  <em>Multi-account inbox with tabbed navigation</em>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/feeds.png" alt="Feeds view" width="700" />
-  <br />
-  <em>Newsletter feeds view</em>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/compose.png" alt="Compose window" width="700" />
-  <br />
-  <em>Compose a new email</em>
-</p>
 
 ## Tech Stack
 
@@ -77,7 +63,7 @@ Curier takes a different approach: a **Rust backend** for speed and safety, a **
 
 ```bash
 # Clone the repo
-git clone https://github.com/yourusername/curier.git
+git clone https://github.com/IamFlowZ/curier.git
 cd curier
 
 # Install frontend dependencies
@@ -87,7 +73,7 @@ npm install
 npm run tauri dev
 ```
 
-On first launch, you'll be prompted to enter your Google OAuth Client ID, Client Secret, and Gmail address. Curier will open your browser to complete the Google authorization flow.
+On first launch, you'll be prompted to enter your Google OAuth Client ID and Client Secret. Curier then opens your browser to Google's consent screen; once you approve, the account is added automatically (you never type your Gmail address into Curier).
 
 ### Google Cloud Setup
 
@@ -105,6 +91,16 @@ npm run tauri build
 ```
 
 This produces a native macOS `.dmg` in `src-tauri/target/release/bundle/`.
+
+### Installing a build on another Mac
+
+Builds are ad-hoc signed, not notarized (that requires a paid Apple developer account). When you copy the app to another Mac, macOS marks it as downloaded and Gatekeeper reports it as "damaged." The app is fine; clear the quarantine flag after copying it into Applications:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Curier.app
+```
+
+Alternatively, launch once, then open System Settings → Privacy & Security and click **Open Anyway**.
 
 ## Architecture
 
@@ -138,9 +134,7 @@ curier/
 
 ## Contributing
 
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on setting up the development environment and submitting pull requests.
-
-If you're looking for a place to start, check out issues labeled [`good first issue`](https://github.com/yourusername/curier/labels/good%20first%20issue).
+Issues and pull requests are welcome. There is no formal process: open an issue describing the problem, or send a PR with a short explanation of the change.
 
 ## License
 
