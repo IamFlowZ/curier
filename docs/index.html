@@ -74,6 +74,10 @@
     .btn:hover { filter: brightness(1.05); }
     .fineprint { margin-top: 14px; font-size: 13px; color: var(--text-muted); }
 
+    .shot { margin: 36px 0 0; }
+    .shot img { width: 100%; height: auto; display: block; border-radius: 12px; border: 1px solid var(--border); box-shadow: 0 20px 60px rgba(0,0,0,0.18); }
+    .shot figcaption { margin-top: 10px; font-size: 13px; color: var(--text-muted); }
+
     .honest {
       margin: 24px auto 0; max-width: 720px;
       background: var(--accent-soft); border: 1px solid var(--border); border-radius: var(--radius);
@@ -154,6 +158,11 @@
         </div>
         <p class="fineprint">Apple Silicon. MIT licensed. Gmail today, Outlook in progress.</p>
 
+        <figure class="shot">
+          <img src="screenshots/feeds.png" alt="Curier's feeds view: four columns labelled Newsletters, Receipts, GitHub and People, each listing messages, with two account tabs across the top" width="1360" height="820" loading="eager" />
+          <figcaption>The feeds view, shown with Curier's built-in demo data.</figcaption>
+        </figure>
+
         <div class="honest">
           <strong>What this is.</strong> A personal tool, built almost entirely with AI coding agents, that the author uses every day to read mail. It has rough edges and it is not trying to replace a full mail client. If you want a lightweight way to parse your inbox in something other than a chronological pile, it might be for you.
         </div>
@@ -186,7 +195,7 @@
           <div class="card">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z"/></svg>
             <h3>Dark mode</h3>
-            <p>Follows the system theme. Rendered email is restyled to match so a white newsletter does not light up the room at night.</p>
+            <p>Follows the system theme. Email content renders on its own card so dark text stays readable whatever the message assumes.</p>
           </div>
           <div class="card">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>

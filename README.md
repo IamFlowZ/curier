@@ -43,6 +43,14 @@ Curier takes a different approach: a **Rust backend** for speed and safety, a **
 - **HTML email rendering** — sanitized with `ammonia` for safe viewing
 - **SQLite storage** — local email cache for fast offline browsing
 
+## Screenshot
+
+<p align="center">
+  <img src="docs/screenshots/feeds.png" alt="Feeds view with four feed columns and two account tabs" width="800" />
+  <br />
+  <em>The feeds view, captured from demo mode</em>
+</p>
+
 ## Tech Stack
 
 - **Backend:** Rust (Tauri 2.x)
@@ -74,6 +82,14 @@ npm run tauri dev
 ```
 
 On first launch, you'll be prompted to enter your Google OAuth Client ID and Client Secret. Curier then opens your browser to Google's consent screen; once you approve, the account is added automatically (you never type your Gmail address into Curier).
+
+### Demo mode
+
+To try Curier without a Google account, or to take screenshots, launch it with `CURIER_DEMO_DATA=1`: the app boots with two fake accounts and a deterministic set of synthetic emails, tags, rules and feeds, and never performs OAuth or touches the network. Demo data lives in a separate `demo/` subdirectory of the app data folder, so your real mailbox cache and settings are left untouched.
+
+```bash
+CURIER_DEMO_DATA=1 npm run tauri dev
+```
 
 ### Google Cloud Setup
 
