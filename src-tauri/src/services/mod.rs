@@ -1,0 +1,12 @@
+pub mod oauth;
+pub mod microsoft_oauth;
+pub mod imap;
+pub mod gmail_api;
+pub mod email_provider;
+pub mod outlook_api;
+pub mod database;
+pub mod memory;
+pub mod credential_store;
+pub mod settings;
+pub mod rule_engine;
+pub mod sync;

@@ -1,0 +1,55 @@
+[package]
+name = "curier"
+version = "0.1.0"
+description = "Minimal macOS Email Client"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "curier_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["native-tls-vendored"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-imap = "0.9"
+async-native-tls = "0.5"
+oauth2 = { version = "4.4", features = ["reqwest"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+mailparse = "0.15"
+rusqlite = { version = "0.32", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
+ammonia = "4.0"
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+machine-uid = "0.5"
+whoami = "1.5"
+tokio = { version = "1.42", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+futures = "0.3"
+anyhow = "1.0"
+chrono = "0.4"
+base64 = "0.22"
+url = "2.5"
+dirs = "5.0"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+urlencoding = "2.1"
+log = "0.4"
+env_logger = "0.11"
+async-trait = "0.1"
+

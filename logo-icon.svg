@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="96" height="96">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0891b2;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#06b6d4;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded square background -->
+  <rect x="4" y="4" width="88" height="88" rx="20" ry="20" fill="url(#grad)" />
+
+  <!-- Envelope flap -->
+  <path d="M22 34 L48 54 L74 34" fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" />
+
+  <!-- Envelope body -->
+  <rect x="22" y="34" width="52" height="34" rx="4" ry="4" fill="none" stroke="#ffffff" stroke-width="3.5" />
+
+  <!-- Forward arrow -->
+  <path d="M54 51 L68 51 M62 45 L68 51 L62 57" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+</svg>
