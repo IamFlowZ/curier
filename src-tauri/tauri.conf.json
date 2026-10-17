@@ -18,7 +18,79 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": [
+          "'self'"
+        ],
+        "script-src": [
+          "'self'",
+          "'sha256-FaQ6aZagnvUW6A2sXi6L0RBd7H2lvPK6kVuGdYRTk58='"
+        ],
+        "style-src": [
+          "'self'",
+          "'unsafe-inline'"
+        ],
+        "img-src": [
+          "'self'",
+          "data:",
+          "https:"
+        ],
+        "frame-src": [
+          "'self'",
+          "about:"
+        ],
+        "connect-src": [
+          "ipc:",
+          "http://ipc.localhost"
+        ],
+        "font-src": [
+          "'self'"
+        ],
+        "object-src": [
+          "'none'"
+        ],
+        "base-uri": [
+          "'self'"
+        ]
+      },
+      "devCsp": {
+        "default-src": [
+          "'self'"
+        ],
+        "script-src": [
+          "'self'",
+          "'unsafe-inline'",
+          "'sha256-FaQ6aZagnvUW6A2sXi6L0RBd7H2lvPK6kVuGdYRTk58='"
+        ],
+        "style-src": [
+          "'self'",
+          "'unsafe-inline'"
+        ],
+        "img-src": [
+          "'self'",
+          "data:",
+          "https:"
+        ],
+        "frame-src": [
+          "'self'",
+          "about:"
+        ],
+        "connect-src": [
+          "ipc:",
+          "http://ipc.localhost",
+          "ws://localhost:1420",
+          "http://localhost:1420"
+        ],
+        "font-src": [
+          "'self'"
+        ],
+        "object-src": [
+          "'none'"
+        ],
+        "base-uri": [
+          "'self'"
+        ]
+      }
     }
   },
   "bundle": {

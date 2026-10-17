@@ -195,6 +195,8 @@ impl SettingsService {
     }
 
     /// Update sync interval
+    /// (Only exercised by tests; the UI goes through `update`.)
+    #[cfg(test)]
     pub fn update_sync_interval(&self, interval_seconds: u64) -> Result<()> {
         let mut settings = self.load()?;
         settings.sync_interval_seconds = interval_seconds;
@@ -205,6 +207,8 @@ impl SettingsService {
     }
 
     /// Toggle background sync
+    /// (Only exercised by tests; the UI goes through `update`.)
+    #[cfg(test)]
     pub fn toggle_background_sync(&self, enable: bool) -> Result<()> {
         let mut settings = self.load()?;
         settings.enable_background_sync = enable;
@@ -224,6 +228,8 @@ impl SettingsService {
     }
 
     /// Update emails per page setting (only allow 20, 50, 100)
+    /// (Only exercised by tests; the UI goes through `update`.)
+    #[cfg(test)]
     pub fn update_emails_per_page(&self, count: u32) -> Result<()> {
         if count != 20 && count != 50 && count != 100 {
             anyhow::bail!("emails_per_page must be 20, 50, or 100");
@@ -235,5 +241,164 @@ impl SettingsService {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
         self.save(&settings)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn service() -> (tempfile::TempDir, SettingsService) {
+        let dir = tempfile::tempdir().unwrap();
+        let service = SettingsService::new(dir.path().join("nested").join("app")).unwrap();
+        (dir, service)
+    }
+
+    #[test]
+    fn settings_new_creates_app_data_dir() {
+        let (dir, _service) = service();
+        assert!(dir.path().join("nested").join("app").is_dir());
+    }
+
+    #[test]
+    fn settings_defaults_are_sane() {
+        let d = AppSettings::default();
+        assert_eq!(d.sync_interval_seconds, 180);
+        assert!(d.enable_background_sync);
+        assert_eq!(d.max_headers_per_folder, 1000);
+        assert_eq!(d.max_bodies_total, 100);
+        assert_eq!(d.emails_per_page, 20);
+        assert!(d.approved_image_domains.is_empty());
+        assert!(d.default_view_mode.is_empty());
+    }
+
+    #[test]
+    fn settings_load_returns_defaults_when_file_missing() {
+        let (_dir, service) = service();
+        let loaded = service.load().unwrap();
+        assert_eq!(loaded.sync_interval_seconds, AppSettings::default().sync_interval_seconds);
+    }
+
+    #[test]
+    fn settings_save_then_load_round_trips() {
+        let (_dir, service) = service();
+        let mut settings = AppSettings::default();
+        settings.sync_interval_seconds = 999;
+        settings.approved_image_domains = vec!["cdn.example.com".to_string()];
+        settings.account_tab_order = vec!["b@x.com".to_string(), "a@x.com".to_string()];
+        settings.default_view_mode.insert("all".to_string(), "feeds".to_string());
+        service.save(&settings).unwrap();
+
+        let loaded = service.load().unwrap();
+        assert_eq!(loaded.sync_interval_seconds, 999);
+        assert_eq!(loaded.approved_image_domains, vec!["cdn.example.com"]);
+        assert_eq!(loaded.account_tab_order, vec!["b@x.com", "a@x.com"]);
+        assert_eq!(loaded.default_view_mode.get("all").map(String::as_str), Some("feeds"));
+    }
+
+    #[test]
+    fn settings_file_on_disk_is_not_plaintext_json() {
+        let (_dir, service) = service();
+        let mut settings = AppSettings::default();
+        settings.approved_image_domains = vec!["needle.example.com".to_string()];
+        service.save(&settings).unwrap();
+        let raw = std::fs::read(&service.settings_path).unwrap();
+        assert!(!String::from_utf8_lossy(&raw).contains("needle.example.com"));
+        assert!(!service.settings_path.with_extension("enc.tmp").exists(), "temp file must be renamed away");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn settings_file_is_owner_read_write_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, service) = service();
+        service.save(&AppSettings::default()).unwrap();
+        let mode = std::fs::metadata(&service.settings_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn settings_empty_file_falls_back_to_defaults() {
+        let (_dir, service) = service();
+        std::fs::write(&service.settings_path, b"").unwrap();
+        assert_eq!(service.load().unwrap().emails_per_page, 20);
+    }
+
+    #[test]
+    fn settings_corrupt_file_falls_back_to_defaults() {
+        let (_dir, service) = service();
+        std::fs::write(&service.settings_path, b"definitely not ciphertext at all").unwrap();
+        assert_eq!(service.load().unwrap().emails_per_page, 20);
+    }
+
+    #[test]
+    fn settings_tampered_ciphertext_falls_back_to_defaults() {
+        let (_dir, service) = service();
+        let mut settings = AppSettings::default();
+        settings.emails_per_page = 100;
+        service.save(&settings).unwrap();
+
+        let mut raw = std::fs::read(&service.settings_path).unwrap();
+        let last = raw.len() - 1;
+        raw[last] ^= 0xff;
+        std::fs::write(&service.settings_path, &raw).unwrap();
+
+        assert_eq!(service.load().unwrap().emails_per_page, 20, "AES-GCM auth failure must not yield tampered data");
+    }
+
+    #[test]
+    fn settings_decrypt_rejects_data_shorter_than_nonce() {
+        let (_dir, service) = service();
+        assert!(service.decrypt(&[0u8; 11]).is_err());
+    }
+
+    #[test]
+    fn settings_encrypt_uses_fresh_nonce_each_time() {
+        let (_dir, service) = service();
+        let a = service.encrypt(b"same").unwrap();
+        let b = service.encrypt(b"same").unwrap();
+        assert_ne!(a[..12], b[..12]);
+        assert_eq!(service.decrypt(&a).unwrap(), b"same");
+        assert_eq!(service.decrypt(&b).unwrap(), b"same");
+    }
+
+    #[test]
+    fn settings_update_emails_per_page_accepts_only_allowed_values() {
+        let (_dir, service) = service();
+        for ok in [20, 50, 100] {
+            service.update_emails_per_page(ok).unwrap();
+            assert_eq!(service.load().unwrap().emails_per_page, ok);
+        }
+        assert!(service.update_emails_per_page(25).is_err());
+        assert!(service.update_emails_per_page(0).is_err());
+        assert_eq!(service.load().unwrap().emails_per_page, 100, "rejected value must not be persisted");
+    }
+
+    #[test]
+    fn settings_update_sync_interval_and_toggle_background_sync_persist() {
+        let (_dir, service) = service();
+        service.update_sync_interval(42).unwrap();
+        service.toggle_background_sync(false).unwrap();
+        let loaded = service.load().unwrap();
+        assert_eq!(loaded.sync_interval_seconds, 42);
+        assert!(!loaded.enable_background_sync);
+    }
+
+    #[test]
+    fn settings_update_bumps_updated_at() {
+        let (_dir, service) = service();
+        let mut settings = AppSettings::default();
+        settings.updated_at = 1;
+        service.update(settings).unwrap();
+        assert!(service.load().unwrap().updated_at > 1);
+    }
+
+    #[test]
+    fn settings_deserialize_tolerates_missing_optional_fields() {
+        let json = r#"{"sync_interval_seconds":1,"enable_background_sync":true,"max_headers_per_folder":2,"max_bodies_total":3,"emails_per_page":20,"updated_at":0}"#;
+        let parsed: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(parsed.approved_image_domains.is_empty());
+        assert!(parsed.account_tab_order.is_empty());
+        assert!(parsed.default_view_mode.is_empty());
     }
 }

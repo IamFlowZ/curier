@@ -80,8 +80,13 @@ export function AddAccountModal({ isOpen, onClose, onAccountAdded }: AddAccountM
   };
 
   const handleCredentialsSubmit = () => {
-    if (!clientId.trim() || !clientSecret.trim()) {
-      setError('Both Client ID and Client Secret are required.');
+    const clientSecretIsRequired = selectedProvider !== 'outlook';
+    if (!clientId.trim()) {
+      setError('Client ID is required.');
+      return;
+    }
+    if (clientSecretIsRequired && !clientSecret.trim()) {
+      setError('Client Secret is required for Google accounts.');
       return;
     }
     setError('');
@@ -102,7 +107,7 @@ export function AddAccountModal({ isOpen, onClose, onAccountAdded }: AddAccountM
 
       // Pass credentials if the user entered them manually
       const args: Record<string, string> = {};
-      if (!hasExistingCredentials && clientId.trim() && clientSecret.trim()) {
+      if (!hasExistingCredentials && clientId.trim()) {
         args.clientId = clientId.trim();
         args.clientSecret = clientSecret.trim();
       }
@@ -258,7 +263,7 @@ export function AddAccountModal({ isOpen, onClose, onAccountAdded }: AddAccountM
                   <li>Enable the Gmail API under "APIs & Services"</li>
                   <li>Go to "Credentials" and create an OAuth 2.0 Client ID</li>
                   <li>Set the application type to "Desktop app"</li>
-                  <li>Add <code className="bg-gray-100 dark:bg-gray-700 px-1 py-0.5 rounded text-xs">http://127.0.0.1:8080</code> as an authorized redirect URI</li>
+                  <li>Desktop app clients accept any loopback port, so no redirect URI needs to be added</li>
                   <li>Copy the Client ID and Client Secret below</li>
                 </ol>
               </details>
@@ -272,9 +277,8 @@ export function AddAccountModal({ isOpen, onClose, onAccountAdded }: AddAccountM
                 <ol className="pl-4 space-y-1 mt-2">
                   <li>Go to the Azure Portal and register a new application</li>
                   <li>Set "Supported account types" to "Accounts in any organizational directory and personal Microsoft accounts"</li>
-                  <li>Add <code className="bg-gray-100 dark:bg-gray-700 px-1 py-0.5 rounded text-xs">http://127.0.0.1:8081</code> as a redirect URI (type: Web)</li>
-                  <li>Under "Certificates & secrets", create a new client secret</li>
-                  <li>Copy the Application (client) ID and the secret value below</li>
+                  <li>Under "Authentication", add a "Mobile and desktop applications" platform with <code className="bg-gray-100 dark:bg-gray-700 px-1 py-0.5 rounded text-xs">http://127.0.0.1</code> as the redirect URI</li>
+                  <li>Copy the Application (client) ID below; a client secret is not required for this platform type</li>
                 </ol>
               </details>
             )}
@@ -300,7 +304,7 @@ export function AddAccountModal({ isOpen, onClose, onAccountAdded }: AddAccountM
 
             <div className="mb-5">
               <label className="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
-                Client Secret
+                Client Secret{selectedProvider === 'outlook' ? ' (optional)' : ''}
               </label>
               <input
                 type="password"

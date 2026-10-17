@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { nowInUnixSeconds } from '../utils/time';
 import type { Tab, AllTab, AccountTab, FolderTab, EmailTab, FeedTab, ComposeTab, SettingsTab, SettingsSection, AccountType } from '../types/tabs';
 
 interface TabState {
@@ -46,6 +47,30 @@ interface TabState {
 }
 
 const ALL_TAB_ID = 'all';
+const COMPOSE_TAB_ID_PREFIX = 'compose-';
+
+/**
+ * Monotonic sequence for compose tab ids. `Date.now()` was previously used,
+ * which collides when two compose tabs are opened within the same millisecond
+ * (e.g. a double-pressed shortcut).
+ */
+let composeTabSequence = 0;
+const nextComposeTabId = (): string => {
+  composeTabSequence += 1;
+  return `${COMPOSE_TAB_ID_PREFIX}${composeTabSequence}`;
+};
+
+/**
+ * Pick the tab to focus after `tabId` is closed: the most recent entry in the
+ * navigation history that is not the closed tab, falling back to "All".
+ */
+const previousTabIdInHistory = (tabHistory: string[], tabId: string): { previousTabId: string; historyWithoutTab: string[] } => {
+  const historyWithoutTab = tabHistory.filter((id) => id !== tabId);
+  const previousTabId = historyWithoutTab.length > 0
+    ? historyWithoutTab[historyWithoutTab.length - 1]
+    : ALL_TAB_ID;
+  return { previousTabId, historyWithoutTab };
+};
 
 // Create the initial "All" tab
 const createAllTab = (): AllTab => ({
@@ -74,10 +99,15 @@ export const useTabStore = create<TabState>((set, get) => ({
     // Cannot remove non-closeable tabs
     if (!tab || !tab.closeable) return;
 
-    set((state) => ({
-      tabs: state.tabs.filter((t) => t.id !== tabId),
-      tabHistory: state.tabHistory.filter((id) => id !== tabId),
-    }));
+    set((state) => {
+      const { previousTabId, historyWithoutTab } = previousTabIdInHistory(state.tabHistory, tabId);
+      return {
+        tabs: state.tabs.filter((t) => t.id !== tabId),
+        tabHistory: historyWithoutTab,
+        // Removing the active tab must not leave focus on a tab that no longer exists
+        activeTabId: state.activeTabId === tabId ? previousTabId : state.activeTabId,
+      };
+    });
   },
 
   setActiveTab: (tabId: string) => {
@@ -189,7 +219,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       subject,
       fromAddress,
       fromName,
-      date: date ?? Math.floor(Date.now() / 1000),
+      date: date ?? nowInUnixSeconds(),
       closeable: true,
       lastAccessed: Date.now(),
     };
@@ -268,14 +298,13 @@ export const useTabStore = create<TabState>((set, get) => ({
       return;
     }
 
-    // Format title: "email - FeedName" or "All - FeedName"
-    const emailPart = accountScope ? accountScope.split('@')[0] : 'All';
-    const title = `${emailPart} - ${feedName}`;
-
+    // The title is the feed name alone; the account is conveyed by the tab's
+    // color bar and the tooltip (see `describeFeedTab`), so truncation never
+    // hides the part that identifies the feed.
     const tab: FeedTab = {
       id: `feed-${feedId}`,
       type: 'feed',
-      title,
+      title: feedName,
       feedId,
       feedName,
       accountScope,
@@ -291,7 +320,7 @@ export const useTabStore = create<TabState>((set, get) => ({
   },
 
   addComposeTab: (accountEmail: string, replyTo?: string, replySubject?: string, inReplyTo?: string, replyQuotedBody?: string, replyFromName?: string, replyDate?: number) => {
-    const tabId = `compose-${Date.now()}`;
+    const tabId = nextComposeTabId();
     const title = replyTo ? 'Reply' : 'New Email';
     const normalizedSubject = replySubject
       ? `Re: ${replySubject.replace(/^Re:\s*/i, '')}`
@@ -368,17 +397,14 @@ export const useTabStore = create<TabState>((set, get) => ({
     // Cannot close non-closeable tabs
     if (!tab || !tab.closeable) return;
 
-    // Find previous tab in history (excluding the one being closed)
-    const historyWithoutCurrent = state.tabHistory.filter((id) => id !== tabId);
-    const previousTabId = historyWithoutCurrent.length > 0
-      ? historyWithoutCurrent[historyWithoutCurrent.length - 1]
-      : ALL_TAB_ID;
-
-    set((state) => ({
-      tabs: state.tabs.filter((t) => t.id !== tabId),
-      activeTabId: previousTabId,
-      tabHistory: historyWithoutCurrent,
-    }));
+    set((state) => {
+      const { previousTabId, historyWithoutTab } = previousTabIdInHistory(state.tabHistory, tabId);
+      return {
+        tabs: state.tabs.filter((t) => t.id !== tabId),
+        activeTabId: previousTabId,
+        tabHistory: historyWithoutTab,
+      };
+    });
   },
 
   initialize: (accounts, accountTabOrder) => {

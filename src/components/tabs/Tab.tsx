@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import type { Tab as TabType } from '../../types/tabs';
-import { getAccountColor, extractAccountId } from '../../utils/accountColors';
+import { getAccountColor } from '../../utils/accountColors';
+import { resolveTabAccountEmail, resolveTabTooltip } from '../../utils/tabAccount';
 
 interface TabProps {
   tab: TabType;
@@ -10,11 +11,9 @@ interface TabProps {
 }
 
 export function Tab({ tab, isActive, onSelect, onClose }: TabProps) {
-  // Prefer accountEmail (raw email address) for color lookup since
-  // configuredColors in settings is keyed by email address, not the
-  // munged accountId (e.g. "user-at-gmail-com").
-  const accountEmail = 'accountEmail' in tab ? (tab as { accountEmail: string }).accountEmail : null;
-  const accountId = accountEmail ?? extractAccountId(tab);
+  // Colors are keyed by raw email address (see configuredColors in settings),
+  // so resolve the email per tab type rather than the munged accountId.
+  const accountEmail = resolveTabAccountEmail(tab);
   const [, setColorVersion] = useState(0);
 
   // Re-render when account colors change
@@ -24,7 +23,7 @@ export function Tab({ tab, isActive, onSelect, onClose }: TabProps) {
     return () => window.removeEventListener('curier:account-colors-changed', handler);
   }, []);
 
-  const accountColor = getAccountColor(accountId);
+  const accountColor = getAccountColor(accountEmail);
   const handleClose = (e: React.MouseEvent) => {
     e.stopPropagation();
     onClose?.();
@@ -75,6 +74,7 @@ export function Tab({ tab, isActive, onSelect, onClose }: TabProps) {
 
   return (
     <div
+      data-tab-id={tab.id}
       onClick={onSelect}
       className={`flex items-center gap-1.5 py-2 px-3 rounded-t-lg cursor-pointer min-w-[100px] max-w-[200px] relative mr-0.5 transition-colors ${
         isActive
@@ -86,6 +86,7 @@ export function Tab({ tab, isActive, onSelect, onClose }: TabProps) {
         {getTabIcon()}
       </span>
       <span
+        title={resolveTabTooltip(tab)}
         className={`text-[13px] overflow-hidden text-ellipsis whitespace-nowrap flex-1 ${
           isActive
             ? 'font-medium text-gray-900 dark:text-gray-100'

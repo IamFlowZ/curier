@@ -50,37 +50,35 @@ pub struct StoredCredentials {
     pub account_type: AccountType,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct MultiAccountCredentials {
-    pub accounts: Vec<StoredAccountCredentials>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredAccountCredentials {
-    pub id: String,
-    pub account_type: AccountType,
-    pub email: String,
-    pub display_name: String,
-    pub client_id: String,
-    pub client_secret: String,
-    pub access_token: String,
-    pub refresh_token: Option<String>,
-    pub expires_at: i64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthState {
     pub is_authenticated: bool,
     pub email: Option<String>,
 }
 
+const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+/// Read-only mailbox access (list/get messages and attachments).
+const GOOGLE_SCOPE_GMAIL_READONLY: &str = "https://www.googleapis.com/auth/gmail.readonly";
+/// Send-only access; together with readonly this covers every Gmail call the app makes.
+const GOOGLE_SCOPE_GMAIL_SEND: &str = "https://www.googleapis.com/auth/gmail.send";
+/// Needed to read the signed-in address from the userinfo endpoint.
+const GOOGLE_SCOPE_EMAIL: &str = "email";
+
+/// Microsoft identity platform v2.0 endpoints (the `/v2/` paths do not exist).
+const MICROSOFT_AUTH_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize";
+const MICROSOFT_TOKEN_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
+
+/// OAuth client configuration plus cached tokens for one account.
+///
+/// The redirect URI is not part of the config: it is chosen per login flow by
+/// `OAuthCallbackListener`, which binds an ephemeral loopback port.
 #[derive(Debug, Clone)]
 pub struct OAuthConfig {
     pub client_id: String,
     pub client_secret: String,
     pub auth_url: String,
     pub token_url: String,
-    pub redirect_url: String,
     pub scopes: Vec<String>,
     pub email: Option<String>,
     pub account_type: AccountType,
@@ -96,13 +94,12 @@ impl OAuthConfig {
         Self {
             client_id: String::new(),
             client_secret: String::new(),
-            auth_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
-            token_url: "https://oauth2.googleapis.com/token".to_string(),
-            redirect_url: "http://127.0.0.1:8080".to_string(),
+            auth_url: GOOGLE_AUTH_URL.to_string(),
+            token_url: GOOGLE_TOKEN_URL.to_string(),
             scopes: vec![
-                "https://www.googleapis.com/auth/gmail.readonly".to_string(),
-                "https://mail.google.com/".to_string(),
-                "email".to_string(),
+                GOOGLE_SCOPE_GMAIL_READONLY.to_string(),
+                GOOGLE_SCOPE_GMAIL_SEND.to_string(),
+                GOOGLE_SCOPE_EMAIL.to_string(),
             ],
             email: None,
             account_type: AccountType::Gmail,
@@ -117,9 +114,8 @@ impl OAuthConfig {
         Self {
             client_id: String::new(),
             client_secret: String::new(),
-            auth_url: "https://login.microsoftonline.com/common/oauth2/v2/authorize".to_string(),
-            token_url: "https://login.microsoftonline.com/common/oauth2/v2/token".to_string(),
-            redirect_url: "http://127.0.0.1:8081".to_string(),
+            auth_url: MICROSOFT_AUTH_URL.to_string(),
+            token_url: MICROSOFT_TOKEN_URL.to_string(),
             scopes: vec![
                 "https://graph.microsoft.com/Mail.Read".to_string(),
                 "https://graph.microsoft.com/Mail.Send".to_string(),
@@ -149,10 +145,4 @@ impl Default for OAuthConfig {
     fn default() -> Self {
         Self::google_defaults()
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OAuthCallbackParams {
-    pub code: String,
-    pub state: String,
 }

@@ -121,12 +121,6 @@ impl AppState {
         accounts.insert(account_email, provider);
     }
 
-    /// Get the email provider for an account
-    pub async fn get_email_service(&self, account_email: &str) -> Option<Arc<dyn EmailProvider>> {
-        let accounts = self.accounts.lock().await;
-        accounts.get(account_email).cloned()
-    }
-
     // ============ Multi-Account Methods ============
 
     /// Get OAuth config for a specific account
@@ -220,7 +214,7 @@ impl AppState {
 
     /// Clear the re-authentication flag for an account (e.g., after successful re-auth)
     pub fn clear_reauth_required(&self, email: &str) {
-        info!("AppState: Clearing re-auth flag for: {}", email);
+        debug!("AppState: Clearing re-auth flag for: {}", email);
         let mut set = self.reauth_required_accounts.lock().unwrap();
         set.remove(email);
     }
@@ -247,29 +241,6 @@ impl AppState {
             config.refresh_token = refresh_token;
             config.expires_at = expires_at;
             debug!("AppState: Updated token cache for: {}", account_id);
-        }
-    }
-
-    /// Reload a specific account from credential store
-    pub fn reload_account_config(&self, account_id: &str, app_data_dir: &PathBuf) -> Result<Option<OAuthConfig>, String> {
-        debug!("AppState: reload_account_config for: {}", account_id);
-
-        // Reload all accounts from credential store
-        match OAuthService::load_all_accounts(app_data_dir) {
-            Ok(accounts) => {
-                let mut cache = self.multi_account_cache.lock().unwrap();
-                for (id, config) in accounts {
-                    cache.accounts.insert(id.clone(), config.clone());
-                    if id == account_id {
-                        return Ok(Some(config));
-                    }
-                }
-                Ok(None)
-            }
-            Err(e) => {
-                warn!("AppState: Error reloading account: {}", e);
-                Err(format!("Failed to reload account: {}", e))
-            }
         }
     }
 }

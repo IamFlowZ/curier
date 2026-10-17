@@ -2,7 +2,7 @@ use crate::models::auth::{AuthState, OAuthConfig, Account, AccountType, GoogleCr
 use crate::services::credential_store::CredentialStore;
 use crate::services::email_provider::EmailProvider;
 use crate::services::gmail_api::GmailApiService;
-use crate::services::oauth::OAuthService;
+use crate::services::oauth::{ClientSecretRequirement, OAuthCallbackListener, OAuthService};
 use crate::services::outlook_api::OutlookApiService;
 use crate::state::AppState;
 use serde::Serialize;
@@ -10,6 +10,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 use log::{debug, info, warn};
+
+const GOOGLE_CREDENTIALS_FILENAME: &str = "google_credentials.json";
+const MICROSOFT_CREDENTIALS_FILENAME: &str = "microsoft_credentials.json";
+const PROVIDER_OUTLOOK: &str = "outlook";
+/// Temporary account key used while the real address is still unknown.
+const GOOGLE_PLACEHOLDER_ACCOUNT: &str = "pending@oauth.temp";
+const MICROSOFT_PLACEHOLDER_ACCOUNT: &str = "pending@microsoft.oauth.temp";
+const MICROSOFT_GRAPH_ME_URL: &str = "https://graph.microsoft.com/v1.0/me";
 
 fn get_app_data_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
     app_handle
@@ -53,33 +61,62 @@ pub fn check_provider_credentials(
     let home_dir = dirs::home_dir()
         .ok_or_else(|| "Could not determine home directory".to_string())?;
 
-    let filename = match provider.as_str() {
-        "outlook" => "microsoft_credentials.json",
-        _ => "google_credentials.json",
+    let (filename, secret_requirement) = match provider.as_str() {
+        PROVIDER_OUTLOOK => (MICROSOFT_CREDENTIALS_FILENAME, ClientSecretRequirement::Optional),
+        _ => (GOOGLE_CREDENTIALS_FILENAME, ClientSecretRequirement::Required),
     };
 
     let creds_path = home_dir.join(".curier").join(filename);
 
-    match std::fs::read_to_string(&creds_path) {
-        Ok(contents) => {
-            if let Ok(creds) = serde_json::from_str::<GoogleCredentials>(&contents) {
-                if !creds.client_id.is_empty() && !creds.client_secret.is_empty() {
-                    return Ok(ProviderCredentialStatus {
-                        exists: true,
-                        client_id: Some(creds.client_id),
-                    });
-                }
-            }
-            Ok(ProviderCredentialStatus {
-                exists: false,
-                client_id: None,
-            })
-        }
+    match OAuthService::load_client_credentials_from_path(&creds_path, secret_requirement) {
+        Ok(creds) => Ok(ProviderCredentialStatus {
+            exists: true,
+            client_id: Some(creds.client_id),
+        }),
         Err(_) => Ok(ProviderCredentialStatus {
             exists: false,
             client_id: None,
         }),
     }
+}
+
+/// Run the loopback authorization-code flow for `config`: bind the callback
+/// listener, emit the auth URL to the frontend, wait for the browser callback
+/// and exchange the code for tokens stored under `placeholder_email`.
+async fn run_loopback_oauth_flow(
+    service: &OAuthService,
+    window: &tauri::Window,
+    placeholder_email: &str,
+    app_data_dir: &PathBuf,
+    log_prefix: &str,
+) -> Result<crate::models::auth::AuthTokens, String> {
+    let listener = OAuthCallbackListener::bind()
+        .await
+        .map_err(|e| {
+            warn!("{}: Failed to bind callback listener: {}", log_prefix, e);
+            format!("Failed to start OAuth callback listener: {}", e)
+        })?;
+
+    debug!("{}: Generating auth URL for redirect {}", log_prefix, listener.redirect_url());
+    let (url, pkce_verifier, csrf_token) = service
+        .generate_auth_url(listener.redirect_url())
+        .map_err(|e| {
+            warn!("{}: Failed to generate auth URL: {}", log_prefix, e);
+            format!("Failed to generate auth URL: {}", e)
+        })?;
+
+    // Emit URL to frontend so browser can open
+    debug!("{}: Auth URL generated, emitting to frontend...", log_prefix);
+    let _ = window.emit("oauth-url", url);
+
+    debug!("{}: Waiting for OAuth callback...", log_prefix);
+    service
+        .complete_oauth_flow(listener, pkce_verifier, csrf_token, placeholder_email.to_string(), app_data_dir)
+        .await
+        .map_err(|e| {
+            warn!("{}: OAuth flow failed: {}", log_prefix, e);
+            format!("OAuth flow failed: {}", e)
+        })
 }
 
 #[tauri::command]
@@ -126,27 +163,9 @@ pub async fn start_google_oauth(
     config.client_secret = resolved_client_secret;
 
     let service = OAuthService::new(config.clone());
+    let placeholder_email = GOOGLE_PLACEHOLDER_ACCOUNT.to_string();
 
-    // Generate the auth URL
-    debug!("start_google_oauth: Generating auth URL...");
-    let (url, pkce_verifier, csrf_token) = service
-        .generate_auth_url()
-        .map_err(|e| {
-            warn!("start_google_oauth: Failed to generate auth URL: {}", e);
-            format!("Failed to generate auth URL: {}", e)
-        })?;
-
-    // Emit URL to frontend so browser can open
-    debug!("start_google_oauth: Auth URL generated, emitting to frontend...");
-    let _ = window.emit("oauth-url", url.clone());
-
-    // Wait for callback and exchange for tokens (this blocks)
-    debug!("start_google_oauth: Waiting for OAuth callback...");
-
-    // We use a placeholder email for now, will fetch real email after token exchange
-    let placeholder_email = "pending@oauth.temp".to_string();
-
-    match service.complete_oauth_flow(pkce_verifier, csrf_token, placeholder_email.clone(), &app_data_dir).await {
+    match run_loopback_oauth_flow(&service, &window, &placeholder_email, &app_data_dir, "start_google_oauth").await {
         Ok(tokens) => {
             debug!("start_google_oauth: Token exchange successful, fetching user email...");
 
@@ -155,7 +174,7 @@ pub async fn start_google_oauth(
                 .await
                 .map_err(|e| format!("Failed to fetch user email: {}", e))?;
 
-            debug!("start_google_oauth: Got user email: {}", email);
+            debug!("start_google_oauth: Got user email");
 
             // Update config with email
             config.email = Some(email.clone());
@@ -200,10 +219,7 @@ pub async fn start_google_oauth(
             info!("start_google_oauth: OAuth flow completed successfully");
             Ok(auth_state)
         }
-        Err(e) => {
-            warn!("start_google_oauth: OAuth flow failed: {}", e);
-            Err(format!("OAuth flow failed: {}", e))
-        }
+        Err(e) => Err(e),
     }
 }
 
@@ -219,28 +235,33 @@ pub async fn start_microsoft_oauth(
 
     let app_data_dir = get_app_data_dir(&app_handle)?;
 
-    // Resolve credentials: explicit params > keychain (existing account) > JSON file
-    let (resolved_client_id, resolved_client_secret) = match (client_id, client_secret) {
-        (Some(id), Some(secret)) if !id.is_empty() && !secret.is_empty() => {
+    // Resolve credentials: explicit params > keychain (existing account) > JSON file.
+    // Microsoft "Mobile and desktop" registrations are public clients, so the
+    // secret is optional; only the client_id is required.
+    let (resolved_client_id, resolved_client_secret) = match client_id {
+        Some(id) if !id.is_empty() => {
             debug!("start_microsoft_oauth: Using credentials provided by frontend");
-            (id, secret)
+            (id, client_secret.unwrap_or_default())
         }
         _ => {
-            if let Ok(accounts) = OAuthService::load_all_accounts(&app_data_dir) {
-                if let Some((_, existing)) = accounts.iter().find(|(_, c)| c.account_type == AccountType::Outlook && !c.client_id.is_empty()) {
+            let existing_outlook_account = OAuthService::load_all_accounts(&app_data_dir)
+                .ok()
+                .and_then(|accounts| {
+                    accounts
+                        .into_iter()
+                        .find(|(_, c)| c.account_type == AccountType::Outlook && !c.client_id.is_empty())
+                });
+            match existing_outlook_account {
+                Some((_, existing)) => {
                     debug!("start_microsoft_oauth: Reusing credentials from existing Outlook account in keychain");
-                    (existing.client_id.clone(), existing.client_secret.clone())
-                } else {
+                    (existing.client_id, existing.client_secret)
+                }
+                None => {
                     let credentials = load_microsoft_credentials()
                         .map_err(|e| format!("{}", e))?;
                     debug!("start_microsoft_oauth: Loaded Microsoft credentials from config file");
                     (credentials.client_id, credentials.client_secret)
                 }
-            } else {
-                let credentials = load_microsoft_credentials()
-                    .map_err(|e| format!("{}", e))?;
-                debug!("start_microsoft_oauth: Loaded Microsoft credentials from config file");
-                (credentials.client_id, credentials.client_secret)
             }
         }
     };
@@ -250,26 +271,9 @@ pub async fn start_microsoft_oauth(
     config.client_secret = resolved_client_secret;
 
     let service = OAuthService::new(config.clone());
+    let placeholder_email = MICROSOFT_PLACEHOLDER_ACCOUNT.to_string();
 
-    // Generate the auth URL
-    debug!("start_microsoft_oauth: Generating auth URL...");
-    let (url, pkce_verifier, csrf_token) = service
-        .generate_auth_url()
-        .map_err(|e| {
-            warn!("start_microsoft_oauth: Failed to generate auth URL: {}", e);
-            format!("Failed to generate auth URL: {}", e)
-        })?;
-
-    // Emit URL to frontend so browser can open
-    debug!("start_microsoft_oauth: Auth URL generated, emitting to frontend...");
-    let _ = window.emit("oauth-url", url.clone());
-
-    // Wait for callback on port 8081 and exchange for tokens
-    debug!("start_microsoft_oauth: Waiting for OAuth callback...");
-
-    let placeholder_email = "pending@microsoft.oauth.temp".to_string();
-
-    match service.complete_oauth_flow(pkce_verifier, csrf_token, placeholder_email.clone(), &app_data_dir).await {
+    match run_loopback_oauth_flow(&service, &window, &placeholder_email, &app_data_dir, "start_microsoft_oauth").await {
         Ok(tokens) => {
             debug!("start_microsoft_oauth: Token exchange successful, fetching user email...");
 
@@ -278,7 +282,7 @@ pub async fn start_microsoft_oauth(
                 .await
                 .map_err(|e| format!("Failed to fetch user email: {}", e))?;
 
-            debug!("start_microsoft_oauth: Got user email: {}", email);
+            debug!("start_microsoft_oauth: Got user email");
 
             // Update config with email
             config.email = Some(email.clone());
@@ -323,40 +327,24 @@ pub async fn start_microsoft_oauth(
             info!("start_microsoft_oauth: OAuth flow completed successfully");
             Ok(auth_state)
         }
-        Err(e) => {
-            warn!("start_microsoft_oauth: OAuth flow failed: {}", e);
-            Err(format!("OAuth flow failed: {}", e))
-        }
+        Err(e) => Err(e),
     }
 }
 
-/// Load Microsoft OAuth credentials from ~/.curier/microsoft_credentials.json
+/// Load Microsoft OAuth credentials from ~/.curier/microsoft_credentials.json.
+/// The client secret may be empty for public-client app registrations.
 fn load_microsoft_credentials() -> anyhow::Result<GoogleCredentials> {
     let home_dir = dirs::home_dir()
         .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-    let creds_path = home_dir.join(".curier").join("microsoft_credentials.json");
-
-    let contents = std::fs::read_to_string(&creds_path)
-        .map_err(|_| anyhow::anyhow!(
-            "Could not read credentials file at {}. Please create this file with your Microsoft OAuth client_id and client_secret.",
-            creds_path.display()
-        ))?;
-
-    let credentials: GoogleCredentials = serde_json::from_str(&contents)
-        .map_err(|_| anyhow::anyhow!("Invalid JSON in Microsoft credentials file. Expected format: {{\"client_id\": \"...\", \"client_secret\": \"...\"}}"))?;
-
-    if credentials.client_id.is_empty() || credentials.client_secret.is_empty() {
-        anyhow::bail!("Microsoft credentials file must contain non-empty client_id and client_secret");
-    }
-
-    Ok(credentials)
+    let creds_path = home_dir.join(".curier").join(MICROSOFT_CREDENTIALS_FILENAME);
+    OAuthService::load_client_credentials_from_path(&creds_path, ClientSecretRequirement::Optional)
 }
 
 /// Fetch user email from Microsoft Graph API
 async fn fetch_microsoft_user_email(access_token: &str) -> anyhow::Result<String> {
     let client = reqwest::Client::new();
     let response = client
-        .get("https://graph.microsoft.com/v1.0/me")
+        .get(MICROSOFT_GRAPH_ME_URL)
         .bearer_auth(access_token)
         .send()
         .await
@@ -382,89 +370,6 @@ async fn fetch_microsoft_user_email(access_token: &str) -> anyhow::Result<String
     user.mail
         .or(user.user_principal_name)
         .ok_or_else(|| anyhow::anyhow!("Microsoft Graph /me returned no email address"))
-}
-
-#[tauri::command]
-pub async fn start_oauth_flow(
-    app_handle: AppHandle,
-    client_id: String,
-    client_secret: String,
-    email: String,
-    window: tauri::Window,
-    state: State<'_, AppState>,
-) -> Result<AuthState, String> {
-    info!("start_oauth_flow: Starting with email: {}", email);
-
-    let app_data_dir = get_app_data_dir(&app_handle)?;
-
-    let mut config = OAuthConfig::default();
-    config.client_id = client_id.clone();
-    config.client_secret = client_secret.clone();
-    config.email = Some(email.clone());
-
-    debug!("start_oauth_flow: Creating OAuth service...");
-    let service = OAuthService::new(config.clone());
-
-    // Step 1: Generate the auth URL (non-blocking)
-    debug!("start_oauth_flow: Generating auth URL...");
-    let (url, pkce_verifier, csrf_token) = service
-        .generate_auth_url()
-        .map_err(|e| {
-            warn!("start_oauth_flow: Failed to generate auth URL: {}", e);
-            format!("Failed to generate auth URL: {}", e)
-        })?;
-
-    debug!("start_oauth_flow: Auth URL generated, emitting to frontend...");
-    // Step 2: Emit URL to frontend immediately so browser can open
-    let _ = window.emit("oauth-url", url.clone());
-
-    debug!("start_oauth_flow: URL emitted, starting OAuth callback wait...");
-
-    // Step 3: Wait for callback and exchange for tokens (this blocks)
-    match service.complete_oauth_flow(pkce_verifier, csrf_token, email.clone(), &app_data_dir).await {
-        Ok(tokens) => {
-            info!("start_oauth_flow: OAuth flow completed successfully");
-
-            // Store in multi-account credential storage
-            if let Err(e) = OAuthService::store_account_credentials(&email, &config, &tokens, AccountType::Gmail, &app_data_dir) {
-                warn!("start_oauth_flow: Failed to store multi-account credentials: {}", e);
-            }
-
-            // Flush credential changes to keychain in a single write
-            if let Err(e) = CredentialStore::new(app_data_dir.clone()).and_then(|s| s.flush()) {
-                warn!("start_oauth_flow: Failed to flush credentials to keychain: {}", e);
-            }
-
-            // Update config with the tokens before caching
-            config.access_token = Some(tokens.access_token);
-            config.refresh_token = tokens.refresh_token;
-            config.expires_at = Some(tokens.expires_at);
-
-            // Cache config in app state
-            state.set_account_config(&email, config.clone());
-
-            // Clear any re-auth required flag since we just authenticated
-            state.clear_reauth_required(&email);
-
-            // Register account for syncing
-            debug!("start_oauth_flow: Registering account for syncing...");
-            let oauth_service = OAuthService::new(config);
-            let gmail_service: Arc<dyn EmailProvider> = Arc::new(GmailApiService::new(oauth_service, app_data_dir));
-            state.register_email_provider(email.clone(), gmail_service).await;
-            debug!("start_oauth_flow: Account registered for syncing");
-
-            let auth_state = AuthState {
-                is_authenticated: true,
-                email: Some(email),
-            };
-            debug!("start_oauth_flow: Returning auth state: {:?}", auth_state);
-            Ok(auth_state)
-        }
-        Err(e) => {
-            warn!("start_oauth_flow: OAuth flow failed: {}", e);
-            Err(format!("OAuth flow failed: {}", e))
-        }
-    }
 }
 
 #[tauri::command]
@@ -555,7 +460,12 @@ pub async fn logout(
     match email {
         Some(account_email) => {
             // Log out specific account
-            info!("logout: Logging out account: {}", account_email);
+            debug!("logout: Logging out account: {}", account_email);
+
+            // Best-effort server-side revocation before the local copy is deleted
+            if let Ok(Some(config)) = state.get_account_config(&account_email, &app_data_dir) {
+                revoke_tokens_best_effort(&config).await;
+            }
 
             // Delete all account data from the database (emails, sync metadata, etc.)
             {
@@ -576,13 +486,17 @@ pub async fn logout(
             // Remove from in-memory cache
             state.remove_account(&account_email);
 
-            info!("logout: Successfully logged out account: {}", account_email);
+            debug!("logout: Successfully logged out account");
         }
         None => {
             // Log out all accounts
             info!("logout: Logging out all accounts");
 
             let all_configs = state.get_all_account_configs(&app_data_dir)?;
+
+            for (_, config) in &all_configs {
+                revoke_tokens_best_effort(config).await;
+            }
 
             // Delete all account data from the database
             {
@@ -614,48 +528,12 @@ pub async fn logout(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn clear_credentials(
-    app_handle: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    info!("clear_credentials: Clearing all stored credentials");
-
-    let app_data_dir = get_app_data_dir(&app_handle)?;
-
-    let all_configs = state.get_all_account_configs(&app_data_dir)?;
-    for (account_email, _) in &all_configs {
-        if let Err(e) = OAuthService::remove_account_credentials(account_email, &app_data_dir) {
-            warn!("clear_credentials: Failed to remove credentials for {}: {}", account_email, e);
-        }
+/// Revoke the account's refresh token at the provider. Failures are logged and
+/// never block local logout.
+async fn revoke_tokens_best_effort(config: &OAuthConfig) {
+    if let Err(e) = OAuthService::revoke_refresh_token(config).await {
+        warn!("logout: Token revocation failed (continuing with local logout): {}", e);
     }
-
-    state.clear_all_accounts();
-
-    info!("clear_credentials: All credentials cleared");
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn get_access_token(
-    app_handle: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<String, String> {
-    let app_data_dir = get_app_data_dir(&app_handle)?;
-
-    // Use the first available account
-    let all_configs = state.get_all_account_configs(&app_data_dir)?;
-    let (_, config) = all_configs
-        .into_iter()
-        .next()
-        .ok_or_else(|| "Not authenticated - no stored credentials".to_string())?;
-
-    let service = OAuthService::new(config);
-
-    service
-        .get_valid_access_token(&app_data_dir)
-        .await
-        .map_err(|e| format!("Failed to get access token: {}", e))
 }
 
 #[tauri::command]

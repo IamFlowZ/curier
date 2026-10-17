@@ -1,5 +1,22 @@
 import { useEffect, useRef, useState } from 'react';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import {
+  IFRAME_MESSAGE_TYPE_HEIGHT,
+  IFRAME_MESSAGE_TYPE_OPEN_URL,
+  OPENABLE_URL_PATTERN,
+  blockRemoteImages,
+  buildIframeDocument,
+  linkifyPlainText,
+} from '../../utils/emailHtml';
+
+/**
+ * Sandbox flags for the email iframe. `allow-scripts` is needed for the
+ * bridge script; `allow-same-origin` is deliberately absent so email content
+ * runs in an opaque origin, and `allow-popups` is absent because every link
+ * is routed through the parent via postMessage (no popups are ever needed).
+ */
+const EMAIL_IFRAME_SANDBOX = 'allow-scripts';
+const INITIAL_IFRAME_HEIGHT_PX = 300;
 
 interface EmailHtmlRendererProps {
   /** Sanitized HTML string, or undefined if the email is plain text */
@@ -14,169 +31,6 @@ interface EmailHtmlRendererProps {
   onApproveImageDomain?: (domain: string) => void;
 }
 
-/** Regex for detecting URLs in plain text */
-const URL_REGEX = /https?:\/\/[^\s<>"')\]]+/g;
-
-/**
- * Escape HTML entities in a plain text string so it can be safely
- * injected into an iframe srcdoc.
- */
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-/**
- * Convert plain text to HTML: escape entities, then wrap detected URLs in
- * `<a>` tags. The result is wrapped in `<pre>` for whitespace preservation.
- */
-function linkifyPlainText(text: string): string {
-  const escaped = escapeHtml(text);
-  const linked = escaped.replace(
-    URL_REGEX,
-    (url) => `<a href="${url}" style="color:#3b82f6;text-decoration:underline">${url}</a>`,
-  );
-  return `<pre style="white-space:pre-wrap;word-wrap:break-word;font-family:inherit;margin:0;line-height:1.6;font-size:15px">${linked}</pre>`;
-}
-
-/** Transparent 1×1 GIF data URI used as a placeholder for blocked remote images */
-const TRANSPARENT_GIF = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
-
-/**
- * Check whether a given hostname matches any of the approved domains.
- * Approving "example.com" also allows "images.example.com" (subdomain match).
- */
-function isDomainApproved(hostname: string, approvedDomains: string[]): boolean {
-  const lower = hostname.toLowerCase();
-  return approvedDomains.some((domain) => {
-    const d = domain.toLowerCase();
-    return lower === d || lower.endsWith(`.${d}`);
-  });
-}
-
-/**
- * Extract the hostname from a URL string, or return null on failure.
- */
-function extractHostname(url: string): string | null {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Replace remote (http/https) image sources with a transparent placeholder,
- * except for images from approved domains.
- * Returns the processed HTML and a deduplicated list of blocked domain names.
- */
-function blockRemoteImages(
-  html: string,
-  approvedDomains: string[] = [],
-): { html: string; blockedDomains: string[] } {
-  const blockedDomainsSet = new Set<string>();
-
-  // Replace src attributes on <img> tags that point to http(s)
-  const processed = html.replace(
-    /(<img\b[^>]*?\bsrc\s*=\s*)(["'])(https?:\/\/[^"']*)\2/gi,
-    (match, prefix: string, quote: string, url: string) => {
-      const hostname = extractHostname(url);
-      if (hostname && isDomainApproved(hostname, approvedDomains)) {
-        return match; // Leave approved images intact
-      }
-      if (hostname) blockedDomainsSet.add(hostname);
-      return `${prefix}${quote}${TRANSPARENT_GIF}${quote} data-original-src=${quote}${url}${quote}`;
-    },
-  );
-
-  // Also catch CSS background-image urls in inline styles
-  const processedWithBg = processed.replace(
-    /background-image\s*:\s*url\(\s*(["']?)(https?:\/\/[^)"']*)\1\s*\)/gi,
-    (match, _quote: string, url: string) => {
-      const hostname = extractHostname(url);
-      if (hostname && isDomainApproved(hostname, approvedDomains)) {
-        return match;
-      }
-      if (hostname) blockedDomainsSet.add(hostname);
-      return `background-image:url(${TRANSPARENT_GIF})`;
-    },
-  );
-
-  return { html: processedWithBg, blockedDomains: Array.from(blockedDomainsSet) };
-}
-
-
-/**
- * Build a full HTML document string to inject into the iframe via srcdoc.
- * Includes a base dark-mode stylesheet when `isDarkMode` is true.
- */
-function buildIframeDocument(bodyHtml: string, isDarkMode: boolean): string {
-  const darkModeStyles = isDarkMode
-    ? `
-      <style>
-        body:not([style*="background"]) {
-          color-scheme: dark;
-          color: #e5e7eb;
-        }
-        a { color: #60a5fa; }
-      </style>`
-    : '';
-
-  return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    body {
-      margin: 0;
-      padding: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      font-size: 15px;
-      line-height: 1.6;
-      overflow-wrap: break-word;
-      word-wrap: break-word;
-      background: transparent;
-    }
-    img { max-width: 100%; height: auto; }
-    table { max-width: 100%; }
-  </style>
-  ${darkModeStyles}
-</head>
-<body>${bodyHtml}
-<script>
-  // Intercept link clicks and send to parent via postMessage
-  document.addEventListener('click', function(e) {
-    var el = e.target;
-    while (el && el.tagName !== 'A') el = el.parentElement;
-    if (el && el.href) {
-      e.preventDefault();
-      e.stopPropagation();
-      var href = el.getAttribute('href');
-      if (href && (href.indexOf('http://') === 0 || href.indexOf('https://') === 0 || href.indexOf('mailto:') === 0)) {
-        parent.postMessage({ type: 'open-url', href: href }, '*');
-      }
-    }
-  });
-
-  // Report content height to parent for auto-sizing
-  function reportHeight() {
-    var h = document.body ? document.body.scrollHeight : 0;
-    parent.postMessage({ type: 'iframe-height', height: h }, '*');
-  }
-  setTimeout(reportHeight, 50);
-  if (typeof ResizeObserver !== 'undefined' && document.body) {
-    new ResizeObserver(reportHeight).observe(document.body);
-  }
-</script>
-</body>
-</html>`;
-}
-
 /**
  * Renders email HTML inside a sandboxed iframe with:
  * - Auto-resizing to match content height (no inner scrollbar)
@@ -187,29 +41,41 @@ function buildIframeDocument(bodyHtml: string, isDarkMode: boolean): string {
  */
 export function EmailHtmlRenderer({ html, plainText, isDarkMode, approvedDomains, onApproveImageDomain }: EmailHtmlRendererProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const [iframeHeight, setIframeHeight] = useState(300);
+  const [iframeHeight, setIframeHeight] = useState(INITIAL_IFRAME_HEIGHT_PX);
   const [imagesLoaded, setImagesLoaded] = useState(false);
 
   // Determine the source HTML
   const rawHtml = html ?? (plainText ? linkifyPlainText(plainText) : '');
 
-  // Block remote images (unless user has clicked "Load images")
+  // Rewrite remote images to detect their domains for the banner (unless the
+  // user has clicked "Load images"). Enforcement is the iframe CSP below.
   const { html: processedHtml, blockedDomains } = imagesLoaded
     ? { html: rawHtml, blockedDomains: [] as string[] }
     : blockRemoteImages(rawHtml, approvedDomains);
 
-  const srcdoc = buildIframeDocument(processedHtml, isDarkMode);
+  const srcdoc = buildIframeDocument(processedHtml, {
+    isDarkMode,
+    allowAllRemoteImages: imagesLoaded,
+    approvedDomains,
+  });
 
-  /** Listen for postMessage events from the sandboxed iframe */
+  /** Listen for postMessage events from this component's own iframe only */
   useEffect(() => {
     const handler = (event: MessageEvent) => {
-      const data = event.data;
-      if (!data || typeof data !== 'object') return;
+      // Ignore messages from any window other than our iframe (other email
+      // tabs, extensions, or anything else that can reach window.postMessage).
+      if (!iframeRef.current || event.source !== iframeRef.current.contentWindow) return;
 
-      if (data.type === 'open-url' && typeof data.href === 'string') {
-        openUrl(data.href).catch((err) => console.error('Failed to open URL:', err));
-      } else if (data.type === 'iframe-height' && typeof data.height === 'number') {
-        setIframeHeight(data.height);
+      const data: unknown = event.data;
+      if (!data || typeof data !== 'object') return;
+      const message = data as { type?: unknown; href?: unknown; height?: unknown };
+
+      if (message.type === IFRAME_MESSAGE_TYPE_OPEN_URL && typeof message.href === 'string') {
+        // Re-validate the scheme here; the iframe script is not a trust boundary.
+        if (!OPENABLE_URL_PATTERN.test(message.href)) return;
+        openUrl(message.href).catch((err) => console.error('Failed to open URL:', err));
+      } else if (message.type === IFRAME_MESSAGE_TYPE_HEIGHT && typeof message.height === 'number') {
+        setIframeHeight(message.height);
       }
     };
 
@@ -284,7 +150,7 @@ export function EmailHtmlRenderer({ html, plainText, isDarkMode, approvedDomains
       <iframe
         ref={iframeRef}
         srcDoc={srcdoc}
-        sandbox="allow-scripts allow-popups"
+        sandbox={EMAIL_IFRAME_SANDBOX}
         title="Email content"
         style={{
           width: '100%',

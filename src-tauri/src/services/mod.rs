@@ -1,6 +1,4 @@
 pub mod oauth;
-pub mod microsoft_oauth;
-pub mod imap;
 pub mod gmail_api;
 pub mod email_provider;
 pub mod outlook_api;

@@ -113,7 +113,7 @@ export function LoginScreen({ message, error, loading, onLogin, onLoginComplete 
                 <li>Enable the <strong>Gmail API</strong> under "APIs & Services"</li>
                 <li>Go to "Credentials" and create an <strong>OAuth 2.0 Client ID</strong></li>
                 <li>Set the application type to <strong>Desktop app</strong></li>
-                <li>Add <code className="bg-gray-100 dark:bg-gray-700 px-1 py-0.5 rounded text-xs">http://127.0.0.1:8080</code> as an authorized redirect URI</li>
+                <li>Desktop app clients accept any loopback port, so no redirect URI needs to be added</li>
                 <li>Copy the Client ID and Client Secret below</li>
               </ol>
             </details>

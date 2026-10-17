@@ -11,6 +11,7 @@ import type {
   FilterCriterion,
 } from '../types/feeds';
 import { queryClient } from '../lib/queryClient';
+import { nowInUnixSeconds } from '../utils/time';
 
 interface FeedsState {
   // State
@@ -461,7 +462,7 @@ export const useFeedsStore = create<FeedsState>((set, get) => ({
                 criteria: input.criteria ?? feed.criteria,
                 matchMode: input.matchMode ?? feed.matchMode,
                 columnWidth: input.columnWidth ?? feed.columnWidth,
-                updatedAt: Date.now(),
+                updatedAt: nowInUnixSeconds(),
               }
             : feed
         ),
@@ -502,14 +503,14 @@ export const useFeedsStore = create<FeedsState>((set, get) => ({
     set({ isLoading: true, error: null });
     try {
       await invoke('reorder_feeds', { feedIds });
-      // Update local state to reflect new order
+      // Mirror the backend: only the supplied feeds get a new column_order
+      // (by position in the list); every other feed is left untouched.
+      const columnOrderByFeedId = new Map<number, number>(feedIds.map((id, index) => [id, index]));
       set((state) => ({
-        feeds: feedIds
-          .map((id, index) => {
-            const feed = state.feeds.find((f) => f.id === id);
-            return feed ? { ...feed, columnOrder: index } : null;
-          })
-          .filter((f): f is Feed => f !== null),
+        feeds: state.feeds.map((feed) => {
+          const columnOrder = columnOrderByFeedId.get(feed.id);
+          return columnOrder === undefined ? feed : { ...feed, columnOrder };
+        }),
         isLoading: false,
       }));
     } catch (error) {

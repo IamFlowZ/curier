@@ -2,18 +2,95 @@ use crate::models::auth::AccountType;
 use crate::models::email::{AttachmentInfo, EmailSummary, EmailBody, PaginatedEmailResponse};
 use crate::services::database::DatabaseService;
 use crate::services::email_provider::{EmailFolder, EmailProvider};
-use crate::services::gmail_api::GmailApiService;
+use crate::services::gmail_api::{validate_header_value, GmailApiService};
 use crate::services::oauth::{OAuthService, TokenState};
 use crate::services::outlook_api::OutlookApiService;
 use crate::services::rule_engine::evaluate_email_against_rule;
 use crate::state::AppState;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::RwLock;
 use log::{debug, info, warn};
+
+/// Pages are 1-based; page 0 would underflow the offset computation.
+const FIRST_PAGE_NUMBER: u32 = 1;
+/// Fallback name when a sender-supplied attachment filename sanitizes to nothing.
+const DEFAULT_ATTACHMENT_FILENAME: &str = "attachment.bin";
+/// Upper bound on a suggested attachment filename (most filesystems cap at 255 bytes).
+const MAX_ATTACHMENT_FILENAME_LENGTH: usize = 200;
+/// Characters that are path separators or otherwise unsafe in a filename on
+/// macOS/Linux/Windows. `:` is the legacy HFS separator and invalid on Windows.
+const ATTACHMENT_FILENAME_FORBIDDEN_CHARACTERS: [char; 9] = ['/', '\\', ':', '<', '>', '"', '|', '?', '*'];
+/// Extended attribute macOS Gatekeeper checks before opening downloaded files.
+#[cfg(target_os = "macos")]
+const MACOS_QUARANTINE_XATTR_NAME: &str = "com.apple.quarantine";
+/// Quarantine flags: 0x0083 = downloaded by an application, not yet user-approved.
+#[cfg(target_os = "macos")]
+const MACOS_QUARANTINE_FLAGS: &str = "0083";
+#[cfg(target_os = "macos")]
+const MACOS_QUARANTINE_AGENT_NAME: &str = "Curier";
+
+/// Compute the zero-based row offset for a 1-based page, rejecting page 0 and
+/// overflow with an explicit error instead of wrapping or panicking.
+fn page_to_offset(page: u32, limit: u32) -> Result<usize, String> {
+    if page < FIRST_PAGE_NUMBER {
+        return Err(format!("page must be >= {} (got {})", FIRST_PAGE_NUMBER, page));
+    }
+    (page - FIRST_PAGE_NUMBER)
+        .checked_mul(limit)
+        .map(|offset| offset as usize)
+        .ok_or_else(|| format!("page {} with limit {} overflows the offset", page, limit))
+}
+
+/// Reduce a sender-supplied attachment filename to something safe to suggest in
+/// a save dialog: no path separators, control characters or leading dots, and
+/// bounded length. Falls back to `attachment.bin` if nothing usable remains.
+pub fn sanitize_attachment_filename(raw_filename: &str) -> String {
+    let mut sanitized: String = raw_filename
+        .chars()
+        .filter(|c| !c.is_control())
+        .map(|c| if ATTACHMENT_FILENAME_FORBIDDEN_CHARACTERS.contains(&c) { '_' } else { c })
+        .collect();
+
+    // Strip leading dots (hidden files, `..`) and surrounding whitespace
+    sanitized = sanitized.trim().trim_start_matches('.').trim().to_string();
+
+    if sanitized.chars().count() > MAX_ATTACHMENT_FILENAME_LENGTH {
+        sanitized = sanitized.chars().take(MAX_ATTACHMENT_FILENAME_LENGTH).collect();
+    }
+
+    if sanitized.is_empty() {
+        DEFAULT_ATTACHMENT_FILENAME.to_string()
+    } else {
+        sanitized
+    }
+}
+
+/// Write downloaded attachment bytes and, on macOS, tag the file with the
+/// quarantine attribute so Gatekeeper treats it like a browser download.
+fn write_attachment_with_quarantine(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)?;
+    apply_quarantine_attribute(path)
+}
+
+#[cfg(target_os = "macos")]
+fn apply_quarantine_attribute(path: &std::path::Path) -> std::io::Result<()> {
+    let downloaded_at_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    // Format: flags;timestamp_hex;agent_name;uuid (uuid may be empty)
+    let value = format!("{};{:x};{};", MACOS_QUARANTINE_FLAGS, downloaded_at_seconds, MACOS_QUARANTINE_AGENT_NAME);
+    xattr::set(path, MACOS_QUARANTINE_XATTR_NAME, value.as_bytes())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apply_quarantine_attribute(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
 
 /// Create the appropriate email provider for an account based on its type.
 fn create_email_provider(config: crate::models::auth::OAuthConfig, app_data_dir: PathBuf) -> (Arc<dyn EmailProvider>, Arc<RwLock<TokenState>>) {
@@ -46,9 +123,11 @@ fn sanitize_email_html(html: &str) -> String {
     // Allow style and class on all elements
     builder.add_generic_attributes(&["style", "class", "id", "dir", "lang"]);
 
-    // Common email layout attributes on table-related elements
+    // Common email layout attributes on table-related elements.
+    // `background` is deliberately excluded: ammonia does not treat it as a URL
+    // attribute, so it would bypass the remote-content blocker.
     let table_attrs: &[&str] = &[
-        "width", "height", "align", "valign", "bgcolor", "background",
+        "width", "height", "align", "valign", "bgcolor",
         "cellpadding", "cellspacing", "border", "role", "colspan", "rowspan",
     ];
     for tag in &["table", "td", "tr", "th", "tbody", "thead", "tfoot"] {
@@ -59,8 +138,9 @@ fn sanitize_email_html(html: &str) -> String {
     builder.add_tag_attributes("img", &["width", "height", "alt", "title"]);
     builder.add_tag_attributes("div", &["align"]);
     builder.add_tag_attributes("p", &["align"]);
-    // span is already in the default tag allowlist; no extra attributes needed
-    builder.add_tag_attributes("a", &["target", "title"]);
+    // span is already in the default tag allowlist; no extra attributes needed.
+    // `target` is excluded so links cannot request a popup from the sandboxed iframe.
+    builder.add_tag_attributes("a", &["title"]);
 
     // Allow font tag attributes (common in older email HTML)
     builder.add_tags(&["font", "center"]);
@@ -124,7 +204,7 @@ pub async fn fetch_emails(
     debug!("fetch_emails: Starting cache-first fetch for account: {} (page: {}, limit: {}, search: {:?})", email, page, limit, search_query);
 
     let app_data_dir = get_app_data_dir(&app_handle)?;
-    let offset = ((page - 1) * limit) as usize;
+    let offset = page_to_offset(page, limit)?;
 
     // When searching, always use cache - search is a cache-only operation
     let is_searching = search_query.as_ref().is_some_and(|q| !q.trim().is_empty());
@@ -261,7 +341,7 @@ pub async fn get_email_body(
     // Step 1: Get email_id from message_id
     let db = state.database.lock().await;
     let email_id = db
-        .get_email_id_by_message_id(&message_id)
+        .get_email_id_by_message_id(&account_email, &message_id)
         .map_err(|e| format!("Failed to lookup email: {}", e))?;
 
     if let Some(email_id) = email_id {
@@ -382,7 +462,7 @@ pub async fn fetch_emails_by_label(
     debug!("fetch_emails_by_label: Fetching from {} for account: {} (page: {}, limit: {}, search: {:?})", label_id, account_email, page, limit, search_query);
 
     let app_data_dir = get_app_data_dir(&app_handle)?;
-    let offset = ((page - 1) * limit) as usize;
+    let offset = page_to_offset(page, limit)?;
 
     // When searching, always use cache - search is a cache-only operation
     let is_searching = search_query.as_ref().is_some_and(|q| !q.trim().is_empty());
@@ -498,7 +578,7 @@ pub async fn fetch_all_emails(
     debug!("fetch_all_emails: Fetching from all accounts (page: {}, limit: {}, search: {:?})...", page, limit, search_query);
 
     let app_data_dir = get_app_data_dir(&app_handle)?;
-    let offset = ((page - 1) * limit) as usize;
+    let offset = page_to_offset(page, limit)?;
 
     // When searching, always use cache - search is a cache-only operation
     let is_searching = search_query.as_ref().is_some_and(|q| !q.trim().is_empty());
@@ -703,7 +783,7 @@ pub async fn download_attachment(
     account_email: String,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
-    debug!("download_attachment: {} for message {} (account: {})", filename, message_id, account_email);
+    debug!("download_attachment: attachment {} for message {} (account: {})", attachment_id, message_id, account_email);
 
     let app_data_dir = get_app_data_dir(&app_handle)?;
     let config = get_account_oauth_config(&state, &account_email, &app_data_dir)?;
@@ -718,12 +798,14 @@ pub async fn download_attachment(
 
     debug!("download_attachment: Downloaded {} bytes, showing save dialog", bytes.len());
 
+    let suggested_filename = sanitize_attachment_filename(&filename);
+
     // Show native save dialog (async callback bridged with oneshot channel)
     let (tx, rx) = tokio::sync::oneshot::channel();
     app_handle
         .dialog()
         .file()
-        .set_file_name(&filename)
+        .set_file_name(&suggested_filename)
         .save_file(move |path| {
             let _ = tx.send(path);
         });
@@ -738,7 +820,7 @@ pub async fn download_attachment(
                 .as_path()
                 .ok_or_else(|| "Invalid save path".to_string())?
                 .to_path_buf();
-            tokio::task::spawn_blocking(move || std::fs::write(&path_buf, &bytes))
+            tokio::task::spawn_blocking(move || write_attachment_with_quarantine(&path_buf, &bytes))
                 .await
                 .map_err(|e| format!("Task join error: {}", e))?
                 .map_err(|e| format!("Failed to write file: {}", e))?;
@@ -762,7 +844,14 @@ pub async fn send_email(
     in_reply_to: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    debug!("send_email: Sending from {} to {}", account_email, to);
+    debug!("send_email: Sending from {}", account_email);
+
+    // Reject header injection before anything reaches a provider
+    validate_header_value("To", &to).map_err(|e| e.to_string())?;
+    validate_header_value("Subject", &subject).map_err(|e| e.to_string())?;
+    if let Some(reply_id) = in_reply_to.as_deref() {
+        validate_header_value("In-Reply-To", reply_id).map_err(|e| e.to_string())?;
+    }
 
     let app_data_dir = get_app_data_dir(&app_handle)?;
     let config = get_account_oauth_config(&state, &account_email, &app_data_dir)?;
@@ -775,7 +864,7 @@ pub async fn send_email(
 
     sync_tokens_to_cache(&token_handle, &account_email, &state).await;
 
-    log::info!("send_email: Email sent successfully from {}", account_email);
+    debug!("send_email: Email sent successfully from {}", account_email);
     Ok(())
 }
 
@@ -855,7 +944,8 @@ pub async fn import_emails(
     app_handle: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<u32, String> {
-    info!("import_emails: Starting import for {} with strategy '{}'", account_email, strategy);
+    info!("import_emails: Starting import with strategy '{}'", strategy);
+    debug!("import_emails: Import account: {}", account_email);
 
     if strategy == "skip" {
         return Ok(0);
@@ -983,8 +1073,240 @@ pub async fn import_emails(
         done: true,
     });
 
-    info!("import_emails: Imported {} emails for {}", total_imported, account_email);
+    info!("import_emails: Imported {} emails", total_imported);
     Ok(total_imported)
 }
 
 // Rule evaluation logic is in crate::services::rule_engine
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::sanitize_email_html;
+
+    #[test]
+    fn sanitize_strips_script_tags_and_their_content() {
+        let out = sanitize_email_html("<p>hi</p><script>alert(1)</script><p>bye</p>");
+        assert!(!out.contains("<script"));
+        assert!(!out.contains("alert(1)"));
+        assert!(out.contains("<p>hi</p>"));
+        assert!(out.contains("<p>bye</p>"));
+    }
+
+    #[test]
+    fn sanitize_strips_javascript_hrefs_but_keeps_link_text() {
+        let out = sanitize_email_html(r#"<a href="javascript:alert(1)">click</a>"#);
+        assert!(!out.contains("javascript:"));
+        assert!(out.contains("click"));
+    }
+
+    #[test]
+    fn sanitize_keeps_https_links_and_adds_rel_noopener() {
+        let out = sanitize_email_html(r#"<a href="https://example.com/x?a=1" target="_blank" title="t">go</a>"#);
+        assert!(out.contains(r#"href="https://example.com/x?a=1""#));
+        assert!(out.contains(r#"title="t""#));
+        assert!(out.contains("noopener"), "ammonia default adds rel=noopener noreferrer: {}", out);
+    }
+
+    #[test]
+    fn sanitize_strips_link_target_attribute() {
+        let out = sanitize_email_html(r#"<a href="https://example.com" target="_blank">go</a>"#);
+        assert!(!out.contains("target="), "{}", out);
+        assert!(out.contains("go"));
+    }
+
+    #[test]
+    fn sanitize_strips_table_background_attribute() {
+        let out = sanitize_email_html(r##"<table background="https://t.example/p.gif"><tr><td background="https://t.example/q.gif" bgcolor="#fff">c</td></tr></table>"##);
+        assert!(!out.contains("background="), "{}", out);
+        assert!(!out.contains("t.example"), "{}", out);
+        assert!(out.contains(r##"bgcolor="#fff""##));
+    }
+
+    #[test]
+    fn sanitize_strips_event_handler_attributes() {
+        let out = sanitize_email_html(r#"<div onclick="x()" onmouseover="y()"><img src="https://a.b/c.png" onerror="z()"></div>"#);
+        assert!(!out.contains("onclick"));
+        assert!(!out.contains("onmouseover"));
+        assert!(!out.contains("onerror"));
+        assert!(out.contains(r#"src="https://a.b/c.png""#));
+    }
+
+    #[test]
+    fn sanitize_strips_iframe_object_and_embed() {
+        let out = sanitize_email_html(r#"<iframe src="https://evil"></iframe><object data="x"></object><embed src="y">text"#);
+        assert!(!out.contains("<iframe"));
+        assert!(!out.contains("<object"));
+        assert!(!out.contains("<embed"));
+        assert!(out.contains("text"));
+    }
+
+    #[test]
+    fn sanitize_preserves_basic_formatting_tags() {
+        let input = "<p><b>bold</b> <i>italic</i> <strong>strong</strong> <em>em</em><br><ul><li>one</li></ul><h1>Head</h1><blockquote>q</blockquote></p>";
+        let out = sanitize_email_html(input);
+        for tag in ["<b>", "<i>", "<strong>", "<em>", "<br>", "<ul>", "<li>", "<h1>", "<blockquote>"] {
+            assert!(out.contains(tag), "expected {} to survive: {}", tag, out);
+        }
+    }
+
+    #[test]
+    fn sanitize_preserves_style_tags_and_inline_style_class_id() {
+        let out = sanitize_email_html(r#"<style>.x{color:red}</style><p class="x" id="p1" style="color:blue" dir="ltr" lang="en">t</p>"#);
+        assert!(out.contains("<style>.x{color:red}</style>"), "{}", out);
+        assert!(out.contains(r#"class="x""#));
+        assert!(out.contains(r#"id="p1""#));
+        assert!(out.contains(r#"style="color:blue""#));
+        assert!(out.contains(r#"dir="ltr""#));
+        assert!(out.contains(r#"lang="en""#));
+    }
+
+    #[test]
+    fn sanitize_preserves_table_layout_attributes() {
+        let out = sanitize_email_html(r##"<table width="600" cellpadding="0" cellspacing="0" border="0" role="presentation" bgcolor="#ffffff"><tr><td align="center" valign="top" colspan="2">c</td></tr></table>"##);
+        for attr in ["width=\"600\"", "cellpadding=\"0\"", "cellspacing=\"0\"", "border=\"0\"", "role=\"presentation\"", "bgcolor=\"#ffffff\"", "align=\"center\"", "valign=\"top\"", "colspan=\"2\""] {
+            assert!(out.contains(attr), "expected {} to survive: {}", attr, out);
+        }
+    }
+
+    #[test]
+    fn sanitize_preserves_font_and_center_tags() {
+        let out = sanitize_email_html(r#"<center><font color="red" size="3" face="Arial">x</font></center>"#);
+        assert!(out.contains("<center>"));
+        assert!(out.contains(r#"<font color="red" size="3" face="Arial">"#), "{}", out);
+    }
+
+    #[test]
+    fn sanitize_keeps_remote_images_with_sizing_attributes() {
+        // Remote images are intentionally allowed through here; the frontend
+        // decides whether to load them based on approved_image_domains.
+        let out = sanitize_email_html(r#"<img src="https://cdn.example.com/a.png" width="100" height="50" alt="A" title="T">"#);
+        assert!(out.contains(r#"src="https://cdn.example.com/a.png""#));
+        assert!(out.contains(r#"width="100""#));
+        assert!(out.contains(r#"height="50""#));
+        assert!(out.contains(r#"alt="A""#));
+        assert!(out.contains(r#"title="T""#));
+    }
+
+    #[test]
+    fn sanitize_strips_image_src_with_disallowed_scheme() {
+        let out = sanitize_email_html(r#"<img src="javascript:alert(1)"><img src="data:text/html;base64,AAAA">"#);
+        assert!(!out.contains("javascript:"));
+        assert!(!out.contains("data:"));
+    }
+
+    #[test]
+    fn sanitize_escapes_unclosed_or_malformed_markup_without_panicking() {
+        let out = sanitize_email_html("<div><p>unclosed <b>bold <script>x");
+        assert!(!out.contains("<script"));
+        assert!(out.contains("unclosed"));
+    }
+
+    #[test]
+    fn sanitize_leaves_plain_text_and_entities_intact() {
+        let out = sanitize_email_html("Tom &amp; Jerry &lt;3");
+        assert_eq!(out, "Tom &amp; Jerry &lt;3");
+    }
+
+    #[test]
+    fn sanitize_does_not_allow_math_or_svg() {
+        // Guards the ammonia mXSS advisories (annotation-xml / svg animate).
+        let out = sanitize_email_html(r#"<math><annotation-xml encoding="text/html"><style><img src=x onerror=alert(1)></style></annotation-xml></math><svg><animate onbegin="alert(1)"/></svg>"#);
+        assert!(!out.contains("<math"));
+        assert!(!out.contains("<svg"));
+        assert!(!out.contains("onerror"));
+        assert!(!out.contains("onbegin"));
+    }
+
+    #[test]
+    fn sanitize_strips_form_elements() {
+        let out = sanitize_email_html(r#"<form action="https://evil"><input name="pw" type="password"><button>go</button></form>"#);
+        assert!(!out.contains("<form"));
+        assert!(!out.contains("<input"));
+    }
+}
+
+#[cfg(test)]
+mod pagination_tests {
+    use super::{page_to_offset, FIRST_PAGE_NUMBER};
+
+    #[test]
+    fn page_to_offset_is_zero_for_first_page() {
+        assert_eq!(page_to_offset(FIRST_PAGE_NUMBER, 50).unwrap(), 0);
+        assert_eq!(page_to_offset(3, 50).unwrap(), 100);
+    }
+
+    #[test]
+    fn page_to_offset_rejects_page_zero_instead_of_underflowing() {
+        let err = page_to_offset(0, 50).unwrap_err();
+        assert!(err.contains("page must be >= 1"), "{}", err);
+    }
+
+    #[test]
+    fn page_to_offset_rejects_overflow() {
+        assert!(page_to_offset(u32::MAX, u32::MAX).is_err());
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::{sanitize_attachment_filename, write_attachment_with_quarantine, DEFAULT_ATTACHMENT_FILENAME, MAX_ATTACHMENT_FILENAME_LENGTH};
+
+    #[test]
+    fn sanitize_attachment_filename_keeps_ordinary_names() {
+        assert_eq!(sanitize_attachment_filename("Q3 Report.pdf"), "Q3 Report.pdf");
+        assert_eq!(sanitize_attachment_filename("résumé (final).docx"), "résumé (final).docx");
+    }
+
+    #[test]
+    fn sanitize_attachment_filename_neutralizes_path_separators_and_colons() {
+        assert_eq!(sanitize_attachment_filename("../../etc/passwd"), "_.._etc_passwd");
+        assert_eq!(sanitize_attachment_filename("C:\\Windows\\x.exe"), "C__Windows_x.exe");
+        assert_eq!(sanitize_attachment_filename("a/b\\c:d"), "a_b_c_d");
+    }
+
+    #[test]
+    fn sanitize_attachment_filename_strips_control_chars_and_leading_dots() {
+        assert_eq!(sanitize_attachment_filename("evil\r\nname.txt"), "evilname.txt");
+        assert_eq!(sanitize_attachment_filename("\u{0}x\u{7f}.bin"), "x.bin");
+        assert_eq!(sanitize_attachment_filename(".hidden"), "hidden");
+        assert_eq!(sanitize_attachment_filename("..."), DEFAULT_ATTACHMENT_FILENAME);
+        assert_eq!(sanitize_attachment_filename("  .  spaced.txt "), "spaced.txt");
+    }
+
+    #[test]
+    fn sanitize_attachment_filename_falls_back_when_empty() {
+        assert_eq!(sanitize_attachment_filename(""), DEFAULT_ATTACHMENT_FILENAME);
+        assert_eq!(sanitize_attachment_filename("   "), DEFAULT_ATTACHMENT_FILENAME);
+        assert_eq!(sanitize_attachment_filename("\n\t"), DEFAULT_ATTACHMENT_FILENAME);
+    }
+
+    #[test]
+    fn sanitize_attachment_filename_caps_length_on_char_boundary() {
+        let long_name = "é".repeat(500);
+        let out = sanitize_attachment_filename(&long_name);
+        assert_eq!(out.chars().count(), MAX_ATTACHMENT_FILENAME_LENGTH);
+    }
+
+    #[test]
+    fn write_attachment_writes_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.bin");
+        write_attachment_with_quarantine(&path, b"hello").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn write_attachment_sets_macos_quarantine_xattr() {
+        use super::{MACOS_QUARANTINE_AGENT_NAME, MACOS_QUARANTINE_FLAGS, MACOS_QUARANTINE_XATTR_NAME};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.bin");
+        write_attachment_with_quarantine(&path, b"hello").unwrap();
+        let value = xattr::get(&path, MACOS_QUARANTINE_XATTR_NAME).unwrap().expect("quarantine xattr present");
+        let value = String::from_utf8(value).unwrap();
+        let fields: Vec<&str> = value.split(';').collect();
+        assert_eq!(fields[0], MACOS_QUARANTINE_FLAGS);
+        assert!(u64::from_str_radix(fields[1], 16).is_ok(), "timestamp should be hex: {}", value);
+        assert_eq!(fields[2], MACOS_QUARANTINE_AGENT_NAME);
+    }
+}

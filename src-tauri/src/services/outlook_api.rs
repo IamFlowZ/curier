@@ -21,8 +21,6 @@ struct GraphMessagesResponse {
     value: Vec<GraphMessage>,
     #[serde(rename = "@odata.count")]
     odata_count: Option<u32>,
-    #[serde(rename = "@odata.nextLink")]
-    odata_next_link: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -612,4 +610,95 @@ fn hash_message_id(message_id: &str) -> u32 {
     let mut hasher = DefaultHasher::new();
     message_id.hash(&mut hasher);
     hasher.finish() as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn graph_message(id: &str) -> GraphMessage {
+        GraphMessage {
+            id: id.to_string(),
+            subject: Some("Subj".to_string()),
+            from: Some(GraphEmailAddressWrapper {
+                email_address: GraphEmailAddress { name: Some("Jane".to_string()), address: Some("jane@example.com".to_string()) },
+            }),
+            received_date_time: Some("2003-07-01T08:52:37Z".to_string()),
+            body_preview: Some("preview".to_string()),
+            has_attachments: Some(true),
+            is_read: Some(true),
+            body: None,
+        }
+    }
+
+    #[test]
+    fn outlook_normalize_folder_id_maps_gmail_style_names_to_graph_well_known_folders() {
+        assert_eq!(OutlookApiService::normalize_folder_id("INBOX"), "inbox");
+        assert_eq!(OutlookApiService::normalize_folder_id("SENT"), "sentitems");
+        assert_eq!(OutlookApiService::normalize_folder_id("DRAFT"), "drafts");
+        assert_eq!(OutlookApiService::normalize_folder_id("DRAFTS"), "drafts");
+        assert_eq!(OutlookApiService::normalize_folder_id("TRASH"), "deleteditems");
+        assert_eq!(OutlookApiService::normalize_folder_id("SPAM"), "junkemail");
+        assert_eq!(OutlookApiService::normalize_folder_id("AAMkAGI2"), "AAMkAGI2");
+    }
+
+    #[test]
+    fn outlook_parse_iso8601_accepts_rfc3339_with_zone() {
+        assert_eq!(parse_iso8601_to_timestamp("2003-07-01T08:52:37Z"), Some(1_057_049_557));
+        assert_eq!(parse_iso8601_to_timestamp("2003-07-01T10:52:37+02:00"), Some(1_057_049_557));
+    }
+
+    #[test]
+    fn outlook_parse_iso8601_accepts_naive_timestamp_as_utc() {
+        assert_eq!(parse_iso8601_to_timestamp("2003-07-01T08:52:37"), Some(1_057_049_557));
+        assert_eq!(parse_iso8601_to_timestamp("2003-07-01T08:52:37.1234567"), Some(1_057_049_557));
+    }
+
+    #[test]
+    fn outlook_parse_iso8601_rejects_garbage() {
+        assert_eq!(parse_iso8601_to_timestamp("not a date"), None);
+    }
+
+    #[test]
+    fn outlook_graph_message_maps_all_fields() {
+        let s = graph_message_to_email_summary(graph_message("m1"));
+        assert_eq!(s.message_id.as_deref(), Some("m1"));
+        assert_eq!(s.uid, hash_message_id("m1"));
+        assert_eq!(s.subject, "Subj");
+        assert_eq!(s.from_address, "jane@example.com");
+        assert_eq!(s.from_name.as_deref(), Some("Jane"));
+        assert_eq!(s.date, 1_057_049_557);
+        assert_eq!(s.snippet.as_deref(), Some("preview"));
+        assert!(s.has_attachments);
+        assert!(s.is_read);
+        assert!(s.account_email.is_none());
+    }
+
+    #[test]
+    fn outlook_graph_message_defaults_missing_fields() {
+        let before = chrono::Utc::now().timestamp();
+        let m = GraphMessage {
+            id: "m2".to_string(),
+            subject: None,
+            from: None,
+            received_date_time: None,
+            body_preview: None,
+            has_attachments: None,
+            is_read: None,
+            body: None,
+        };
+        let s = graph_message_to_email_summary(m);
+        assert_eq!(s.subject, "");
+        assert_eq!(s.from_address, "");
+        assert_eq!(s.from_name, None);
+        assert!(!s.has_attachments);
+        assert!(!s.is_read);
+        assert!(s.date >= before);
+    }
+
+    #[test]
+    fn outlook_hash_message_id_is_deterministic() {
+        assert_eq!(hash_message_id("x"), hash_message_id("x"));
+        assert_ne!(hash_message_id("x"), hash_message_id("y"));
+    }
 }

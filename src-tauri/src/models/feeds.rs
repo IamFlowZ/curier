@@ -12,25 +12,6 @@ pub struct Tag {
     pub created_at: i64,
 }
 
-/// Input for creating a new tag
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateTagInput {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub icon: Option<String>,
-}
-
-/// Email-tag association with metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EmailTag {
-    pub email_id: i64,
-    pub tag_id: i64,
-    pub applied_by: String, // 'manual' | 'rule:{rule_id}'
-    pub applied_at: i64,
-}
-
 /// Filter criterion for matching emails
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilterCriterion {
@@ -142,15 +123,6 @@ pub struct RuleExecutionResult {
     pub tags_removed: i32,
 }
 
-/// Rule execution tracking record
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuleExecution {
-    pub id: i64,
-    pub rule_id: i64,
-    pub executed_at: i64,
-    pub emails_matched: i32,
-}
-
 /// Paginated feed emails response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaginatedFeedResponse {
@@ -160,10 +132,3 @@ pub struct PaginatedFeedResponse {
     pub has_more: bool,
 }
 
-/// Email with tags attached
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EmailWithTags {
-    #[serde(flatten)]
-    pub email: crate::models::email::EmailSummary,
-    pub tags: Vec<Tag>,
-}

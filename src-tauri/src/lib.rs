@@ -3,7 +3,7 @@ mod models;
 mod services;
 mod state;
 
-use commands::auth::{clear_credentials, get_access_token, is_authenticated, logout, start_oauth_flow, start_google_oauth, start_microsoft_oauth, get_accounts, check_provider_credentials};
+use commands::auth::{is_authenticated, logout, start_google_oauth, start_microsoft_oauth, get_accounts, check_provider_credentials};
 use commands::email::{fetch_emails, get_cached_emails, get_email_body, get_folders, fetch_emails_by_label, fetch_all_emails, list_attachments, download_attachment, send_email, import_emails};
 use commands::feeds::{create_feed, get_feeds, get_feed, update_feed, delete_feed, reorder_feeds, fetch_feed_emails};
 use commands::settings::{get_settings, update_settings, get_cache_stats, clear_cache, get_account_colors, set_account_color, trigger_sync, get_sync_status};
@@ -73,13 +73,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             // Auth commands
-            start_oauth_flow,
             start_google_oauth,
             start_microsoft_oauth,
             is_authenticated,
             logout,
-            clear_credentials,
-            get_access_token,
             get_accounts,
             check_provider_credentials,
             // Email commands

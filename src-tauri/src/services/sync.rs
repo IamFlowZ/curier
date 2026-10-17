@@ -10,6 +10,14 @@ use crate::services::oauth::OAuthService;
 use crate::services::rule_engine::evaluate_email_against_rule;
 use crate::state::AppState;
 
+/// Delay before retrying when settings cannot be loaded.
+const SYNC_SETTINGS_FAILURE_BACKOFF: Duration = Duration::from_secs(60);
+/// How often to re-check settings while background sync is disabled.
+const SYNC_DISABLED_POLL_INTERVAL: Duration = Duration::from_secs(30);
+/// Delay before the next cycle after a cycle task panicked.
+const SYNC_CYCLE_PANIC_BACKOFF: Duration = Duration::from_secs(60);
+const SYNC_CYCLE_PANIC_ERROR_MESSAGE: &str = "Sync cycle crashed unexpectedly; it will retry automatically";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncStatus {
     pub is_running: bool,
@@ -51,7 +59,8 @@ impl SyncService {
 
         let status = Arc::clone(&self.status);
 
-        // Spawn background task
+        // Spawn background task. Each cycle runs in its own task so a panic
+        // inside one cycle (e.g. a malformed message) cannot kill the loop.
         tauri::async_runtime::spawn(async move {
             loop {
                 // Check for shutdown signal (non-blocking)
@@ -60,59 +69,20 @@ impl SyncService {
                     break;
                 }
 
-                // Load settings to get sync interval
-                let state: tauri::State<AppState> = app_handle.state();
-                let settings_service = state.settings_service.lock().await;
-                let settings = match settings_service.load() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        warn!("SYNC: Failed to load settings: {}", e);
-                        sleep(Duration::from_secs(60)).await;
-                        continue;
-                    }
-                };
-                drop(settings_service);
-
-                // Check if background sync is enabled
-                if !settings.enable_background_sync {
-                    debug!("SYNC: Background sync is disabled");
-                    sleep(Duration::from_secs(30)).await;
-                    continue;
-                }
-
-                // Perform sync
-                info!("SYNC: Starting sync cycle");
-                let sync_result = Self::sync_all_accounts_internal(
+                let cycle_handle = tokio::spawn(Self::run_sync_cycle(
                     app_handle.clone(),
                     Arc::clone(&status),
-                )
-                .await;
+                ));
 
-                match sync_result {
-                    Ok(_) => {
-                        info!("SYNC: Sync cycle completed successfully");
-                        let mut s = status.write().await;
-                        s.last_sync_time = Some(
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs() as i64,
-                        );
-                        s.last_sync_error = None;
-                    }
-                    Err(e) => {
-                        warn!("SYNC: Sync cycle failed: {}", e);
-                        let mut s = status.write().await;
-                        s.last_sync_error = Some(e.to_string());
-                    }
+                let (sleep_duration, cycle_failure) = Self::next_cycle_delay(cycle_handle.await);
+                if let Some(failure_message) = cycle_failure {
+                    let mut s = status.write().await;
+                    s.is_running = false;
+                    s.syncing_account = None;
+                    s.last_sync_error = Some(failure_message);
                 }
 
-                // Sleep for configured interval
-                let sleep_duration = Duration::from_secs(settings.sync_interval_seconds);
-                debug!(
-                    "SYNC: Sleeping for {} seconds until next sync",
-                    settings.sync_interval_seconds
-                );
+                debug!("SYNC: Sleeping for {} seconds until next sync", sleep_duration.as_secs());
                 sleep(sleep_duration).await;
             }
 
@@ -121,6 +91,73 @@ impl SyncService {
 
         info!("SYNC: Background sync service started");
         Ok(())
+    }
+
+    /// Translate a cycle task's join result into the delay before the next cycle
+    /// and, when the task panicked or was cancelled, the error to surface in
+    /// `SyncStatus`. A panic in one cycle must never end the loop.
+    fn next_cycle_delay(join_result: std::result::Result<Duration, tokio::task::JoinError>) -> (Duration, Option<String>) {
+        match join_result {
+            Ok(next_sleep) => (next_sleep, None),
+            Err(join_error) if join_error.is_panic() => {
+                warn!(
+                    "SYNC: Sync cycle panicked; the sync loop will continue after {} seconds",
+                    SYNC_CYCLE_PANIC_BACKOFF.as_secs()
+                );
+                (SYNC_CYCLE_PANIC_BACKOFF, Some(SYNC_CYCLE_PANIC_ERROR_MESSAGE.to_string()))
+            }
+            Err(join_error) => {
+                warn!("SYNC: Sync cycle task was cancelled: {}", join_error);
+                (SYNC_CYCLE_PANIC_BACKOFF, Some(format!("Sync cycle was cancelled: {}", join_error)))
+            }
+        }
+    }
+
+    /// Run one background sync cycle and return how long to sleep before the next.
+    async fn run_sync_cycle(app_handle: AppHandle, status: Arc<RwLock<SyncStatus>>) -> Duration {
+        // Load settings to get sync interval
+        let settings = {
+            let state: tauri::State<AppState> = app_handle.state();
+            let settings_service = state.settings_service.lock().await;
+            match settings_service.load() {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("SYNC: Failed to load settings: {}", e);
+                    return SYNC_SETTINGS_FAILURE_BACKOFF;
+                }
+            }
+        };
+
+        // Check if background sync is enabled
+        if !settings.enable_background_sync {
+            debug!("SYNC: Background sync is disabled");
+            return SYNC_DISABLED_POLL_INTERVAL;
+        }
+
+        // Perform sync
+        info!("SYNC: Starting sync cycle");
+        let sync_result = Self::sync_all_accounts_internal(app_handle, Arc::clone(&status)).await;
+
+        match sync_result {
+            Ok(_) => {
+                info!("SYNC: Sync cycle completed successfully");
+                let mut s = status.write().await;
+                s.last_sync_time = Some(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64,
+                );
+                s.last_sync_error = None;
+            }
+            Err(e) => {
+                warn!("SYNC: Sync cycle failed: {}", e);
+                let mut s = status.write().await;
+                s.last_sync_error = Some(e.to_string());
+            }
+        }
+
+        Duration::from_secs(settings.sync_interval_seconds)
     }
 
     /// Stop the background sync service
@@ -374,7 +411,7 @@ impl SyncService {
                 .context("Failed to evict old headers")?;
         }
 
-        info!(
+        debug!(
             "SYNC: Completed syncing folder {} for {}",
             folder_id, account_email
         );
@@ -386,5 +423,43 @@ impl SyncService {
 impl Drop for SyncService {
     fn drop(&mut self) {
         let _ = self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sync_next_cycle_delay_passes_through_successful_cycle_interval() {
+        let handle = tokio::spawn(async { Duration::from_secs(123) });
+        let (delay, failure) = SyncService::next_cycle_delay(handle.await);
+        assert_eq!(delay, Duration::from_secs(123));
+        assert_eq!(failure, None);
+    }
+
+    #[tokio::test]
+    async fn sync_next_cycle_delay_isolates_a_panicking_cycle() {
+        let handle = tokio::spawn(async {
+            if true {
+                panic!("malformed message");
+            }
+            Duration::from_secs(1)
+        });
+        let (delay, failure) = SyncService::next_cycle_delay(handle.await);
+        assert_eq!(delay, SYNC_CYCLE_PANIC_BACKOFF);
+        assert_eq!(failure.as_deref(), Some(SYNC_CYCLE_PANIC_ERROR_MESSAGE));
+    }
+
+    #[tokio::test]
+    async fn sync_next_cycle_delay_reports_cancelled_cycle() {
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Duration::from_secs(1)
+        });
+        handle.abort();
+        let (delay, failure) = SyncService::next_cycle_delay(handle.await);
+        assert_eq!(delay, SYNC_CYCLE_PANIC_BACKOFF);
+        assert!(failure.unwrap().contains("cancelled"));
     }
 }

@@ -24,12 +24,6 @@ pub struct EmailBody {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FullEmail {
-    pub summary: EmailSummary,
-    pub body: EmailBody,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaginatedEmailResponse {
     pub emails: Vec<EmailSummary>,
     pub total_count: u32,

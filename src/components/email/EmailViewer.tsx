@@ -4,14 +4,9 @@ import { useTabStore } from '../../store/tabStore';
 import { getAccountColor, extractAccountId } from '../../utils/accountColors';
 import { EmailHtmlRenderer } from './EmailHtmlRenderer';
 import { useTheme } from '../../hooks/useTheme';
+import { formatByteSize } from '../../utils/formatByteSize';
+import { htmlToPlainText } from '../../utils/htmlToPlainText';
 import type { AttachmentInfo } from '../../types/email';
-
-function formatFileSize(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  return `${(bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
-}
 
 interface EmailViewerProps {
   emailId: string;
@@ -121,10 +116,9 @@ export function EmailViewer({ emailId, subject, accountEmail, fromAddress, fromN
     if (emailBody?.text_body) {
       quotedText = emailBody.text_body;
     } else if (emailBody?.html_body) {
-      // Strip HTML tags for a plain text quote
-      const tmp = document.createElement('div');
-      tmp.innerHTML = emailBody.html_body;
-      quotedText = tmp.textContent ?? tmp.innerText ?? '';
+      // Strip HTML tags for a plain text quote. DOMParser is inert: unlike
+      // innerHTML it does not fetch remote images (tracking pixels).
+      quotedText = htmlToPlainText(emailBody.html_body);
     }
 
     addComposeTab(
@@ -209,7 +203,7 @@ export function EmailViewer({ emailId, subject, accountEmail, fromAddress, fromN
               >
                 <span className="font-medium truncate max-w-[200px]">{att.filename}</span>
                 <span className="text-xs text-gray-500 dark:text-gray-400">
-                  {formatFileSize(att.size)}
+                  {formatByteSize(att.size)}
                 </span>
                 {downloadingId === att.id ? (
                   <div className="w-4 h-4 border-2 border-gray-300 dark:border-gray-600 border-t-blue-600 rounded-full animate-spin" />

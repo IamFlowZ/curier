@@ -297,11 +297,6 @@ impl GmailApiService {
         Ok((html_body, text_body))
     }
 
-    /// Fetch recent emails from INBOX
-    pub async fn fetch_recent_emails(&self, count: u32) -> Result<Vec<EmailSummary>> {
-        self.fetch_emails_by_label(LABEL_INBOX, count).await
-    }
-
     /// Fetch folder/label list from Gmail API
     pub async fn list_folders(&self) -> Result<Vec<GmailFolder>> {
         debug!("Gmail API: Fetching folder list");
@@ -388,17 +383,6 @@ impl GmailApiService {
 
         info!("Gmail API: Fetched {} emails from {}", emails.len(), label_id);
         Ok(emails)
-    }
-
-    /// Fetch emails (alias for fetch_emails_by_label)
-    pub async fn fetch_emails(&self, label_id: &str, count: u32) -> Result<Vec<EmailSummary>> {
-        self.fetch_emails_by_label(label_id, count).await
-    }
-
-    /// Fetch recent emails with pagination using Gmail's nextPageToken.
-    /// Returns (emails, total_count_estimate).
-    pub async fn fetch_recent_emails_paginated(&self, offset: u32, limit: u32) -> Result<(Vec<EmailSummary>, u32)> {
-        self.fetch_emails_by_label_paginated(LABEL_INBOX, offset, limit).await
     }
 
     /// Fetch emails by label with pagination using Gmail's nextPageToken.
@@ -624,17 +608,97 @@ impl GmailApiService {
     }
 }
 
+/// Maximum number of base64 characters per RFC 2047 encoded-word chunk so the
+/// whole `=?UTF-8?B?...?=` token stays under the 75-character limit.
+const RFC2047_MAX_ENCODED_CHARS_PER_WORD: usize = 60;
+const RFC2047_ENCODED_WORD_PREFIX: &str = "=?UTF-8?B?";
+const RFC2047_ENCODED_WORD_SUFFIX: &str = "?=";
+
+/// Error returned when a caller-supplied header value could inject extra headers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderInjectionError {
+    pub header_name: String,
+}
+
+impl std::fmt::Display for HeaderInjectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} header must not contain line breaks", self.header_name)
+    }
+}
+
+impl std::error::Error for HeaderInjectionError {}
+
+/// Reject header values containing CR or LF, which would terminate the header
+/// and let the value smuggle in additional headers (e.g. `Bcc:`).
+pub fn validate_header_value(header_name: &str, value: &str) -> std::result::Result<(), HeaderInjectionError> {
+    if value.contains('\r') || value.contains('\n') {
+        return Err(HeaderInjectionError { header_name: header_name.to_string() });
+    }
+    Ok(())
+}
+
+/// Encode a header value as RFC 2047 encoded-words when it contains
+/// non-ASCII characters; pure-ASCII input is returned unchanged.
+pub fn encode_header_value_rfc2047(value: &str) -> String {
+    use base64::{engine::general_purpose, Engine as _};
+
+    if value.is_ascii() {
+        return value.to_string();
+    }
+
+    // Split on UTF-8 character boundaries so each chunk decodes independently.
+    // 45 bytes of input -> 60 base64 chars.
+    const MAX_INPUT_BYTES_PER_WORD: usize = RFC2047_MAX_ENCODED_CHARS_PER_WORD / 4 * 3;
+    let mut encoded_words: Vec<String> = Vec::new();
+    let mut chunk = String::new();
+    for character in value.chars() {
+        if chunk.len() + character.len_utf8() > MAX_INPUT_BYTES_PER_WORD {
+            encoded_words.push(general_purpose::STANDARD.encode(chunk.as_bytes()));
+            chunk.clear();
+        }
+        chunk.push(character);
+    }
+    if !chunk.is_empty() {
+        encoded_words.push(general_purpose::STANDARD.encode(chunk.as_bytes()));
+    }
+
+    encoded_words
+        .into_iter()
+        .map(|word| format!("{}{}{}", RFC2047_ENCODED_WORD_PREFIX, word, RFC2047_ENCODED_WORD_SUFFIX))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Build a minimal RFC 2822 message for sending via the Gmail API.
-fn build_rfc2822_message(from: &str, to: &str, subject: &str, body: &str, in_reply_to: Option<&str>) -> String {
+///
+/// Callers must have validated `to`, `subject` and `in_reply_to` with
+/// [`validate_header_value`]; this function is defensive and returns an error
+/// if a line break slipped through. Non-ASCII subjects are RFC 2047 encoded.
+fn build_rfc2822_message(
+    from: &str,
+    to: &str,
+    subject: &str,
+    body: &str,
+    in_reply_to: Option<&str>,
+) -> std::result::Result<String, HeaderInjectionError> {
+    validate_header_value("From", from)?;
+    validate_header_value("To", to)?;
+    validate_header_value("Subject", subject)?;
+    if let Some(reply_id) = in_reply_to {
+        validate_header_value("In-Reply-To", reply_id)?;
+    }
+
     let mut message = format!(
         "From: {}\r\nTo: {}\r\nSubject: {}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n",
-        from, to, subject
+        from,
+        to,
+        encode_header_value_rfc2047(subject)
     );
     if let Some(reply_id) = in_reply_to {
         message.push_str(&format!("In-Reply-To: {}\r\nReferences: {}\r\n", reply_id, reply_id));
     }
     message.push_str(&format!("\r\n{}", body));
-    message
+    Ok(message)
 }
 
 #[async_trait]
@@ -690,11 +754,12 @@ impl EmailProvider for GmailApiService {
     async fn send_email(&self, to: &str, subject: &str, body: &str, in_reply_to: Option<&str>) -> Result<()> {
         use base64::{Engine as _, engine::general_purpose};
 
-        debug!("Gmail API: Sending email to {}", to);
+        debug!("Gmail API: Sending email");
         let access_token = self.access_token().await?;
 
         // Gmail replaces the From header with the authenticated user's address
-        let raw_message = build_rfc2822_message("me", to, subject, body, in_reply_to);
+        let raw_message = build_rfc2822_message("me", to, subject, body, in_reply_to)
+            .map_err(|e| anyhow::anyhow!("Refusing to send email: {}", e))?;
         let encoded = general_purpose::URL_SAFE_NO_PAD.encode(raw_message.as_bytes());
 
         let url = format!("{}/users/me/messages/send", GMAIL_API_BASE);
@@ -713,12 +778,34 @@ impl EmailProvider for GmailApiService {
             return Err(anyhow::anyhow!("Gmail send failed: {} - {}", status, error_text));
         }
 
-        info!("Gmail API: Email sent successfully to {}", to);
+        debug!("Gmail API: Email sent successfully");
         Ok(())
     }
 
     fn oauth_token_state_handle(&self) -> Arc<RwLock<TokenState>> {
         GmailApiService::oauth_token_state_handle(self)
+    }
+}
+
+/// Split a `From:` header into (address, display name) using a real RFC 5322
+/// parser. Malformed headers never panic: the raw value is returned as the
+/// address with no display name.
+fn parse_from_header(from: &str) -> (String, Option<String>) {
+    use mailparse::MailAddr;
+
+    let first_mailbox = mailparse::addrparse(from).ok().and_then(|addresses| {
+        addresses.iter().find_map(|address| match address {
+            MailAddr::Single(info) => Some(info.clone()),
+            MailAddr::Group(group) => group.addrs.first().cloned(),
+        })
+    });
+
+    match first_mailbox {
+        Some(info) if !info.addr.is_empty() => {
+            let display_name = info.display_name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+            (info.addr, display_name)
+        }
+        _ => (from.trim().to_string(), None),
     }
 }
 
@@ -733,20 +820,9 @@ fn message_to_email_summary(message: &Message) -> EmailSummary {
         match header.name.as_str() {
             "Subject" => subject = header.value.clone(),
             "From" => {
-                let from = &header.value;
-                if let Some(email_start) = from.rfind('<') {
-                    if let Some(email_end) = from.rfind('>') {
-                        from_address = from[email_start + 1..email_end].to_string();
-                        let name_part = from[..email_start].trim();
-                        if !name_part.is_empty() {
-                            from_name = Some(name_part.to_string());
-                        }
-                    } else {
-                        from_address = from.clone();
-                    }
-                } else {
-                    from_address = from.clone();
-                }
+                let (address, name) = parse_from_header(&header.value);
+                from_address = address;
+                from_name = name;
             }
             "Date" => date_str = header.value.clone(),
             _ => {}
@@ -875,25 +951,34 @@ fn extract_body_from_part(part: &MessagePart) -> (Option<String>, Option<String>
     (html_body, text_body)
 }
 
-/// Decode base64url-encoded body data to a string
+/// base64url engine that accepts both padded and unpadded input, as Gmail
+/// emits unpadded base64url (RFC 4648 section 5) for body and attachment data.
+const BASE64_URL_SAFE_INDIFFERENT_PADDING: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+    &base64::alphabet::URL_SAFE,
+    base64::engine::GeneralPurposeConfig::new()
+        .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+);
+
+/// Decode base64url-encoded body data to a string.
+/// Invalid data yields an empty string rather than the still-encoded input.
 fn decode_base64_body(data: &str) -> String {
-    use base64::{Engine as _, engine::general_purpose};
+    use base64::Engine as _;
 
-    let normalized = data.replace('-', "+").replace('_', "/");
-
-    match general_purpose::STANDARD.decode(&normalized) {
+    match BASE64_URL_SAFE_INDIFFERENT_PADDING.decode(data) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-        Err(_) => data.to_string(),
+        Err(e) => {
+            warn!("Gmail API: Failed to decode base64url body data: {}", e);
+            String::new()
+        }
     }
 }
 
 /// Decode base64url-encoded data to raw bytes
 fn decode_base64_bytes(data: &str) -> Result<Vec<u8>> {
-    use base64::{Engine as _, engine::general_purpose};
+    use base64::Engine as _;
 
-    let normalized = data.replace('-', "+").replace('_', "/");
-    general_purpose::STANDARD
-        .decode(&normalized)
+    BASE64_URL_SAFE_INDIFFERENT_PADDING
+        .decode(data)
         .context("Failed to decode base64 attachment data")
 }
 
@@ -926,5 +1011,403 @@ fn collect_attachments(parts: &[MessagePart], out: &mut Vec<AttachmentInfo>) {
         if let Some(nested) = &part.parts {
             collect_attachments(nested, out);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn header(name: &str, value: &str) -> MessageHeader {
+        MessageHeader { name: name.to_string(), value: value.to_string() }
+    }
+
+    fn body(data: Option<&str>, attachment_id: Option<&str>, size: u32) -> MessageBody {
+        MessageBody { size, data: data.map(String::from), attachment_id: attachment_id.map(String::from) }
+    }
+
+    fn part(mime: &str, data: Option<&str>) -> MessagePart {
+        MessagePart { mime_type: mime.to_string(), filename: None, body: data.map(|d| body(Some(d), None, 0)), parts: None }
+    }
+
+    fn message(headers: Vec<MessageHeader>) -> Message {
+        Message {
+            id: "abc123".to_string(),
+            thread_id: "t".to_string(),
+            label_ids: None,
+            snippet: Some("snip".to_string()),
+            payload: MessagePayload { headers, body: None, parts: None, mime_type: None },
+            internal_date: None,
+        }
+    }
+
+    fn b64url(s: &str) -> String {
+        use base64::{engine::general_purpose, Engine as _};
+        general_purpose::URL_SAFE.encode(s.as_bytes())
+    }
+
+    // ----- base64 -----
+
+    #[test]
+    fn gmail_decode_base64_body_decodes_padded_base64url() {
+        // Includes bytes that encode to '-' and '_' in the url-safe alphabet.
+        let original = "hello?>world~~";
+        assert_eq!(decode_base64_body(&b64url(original)), original);
+    }
+
+    #[test]
+    fn gmail_decode_base64_body_decodes_unpadded_base64url() {
+        // Gmail emits unpadded base64url (RFC 4648 s5); the decoder must accept it.
+        use base64::{engine::general_purpose, Engine as _};
+        let unpadded = general_purpose::URL_SAFE_NO_PAD.encode(b"hello");
+        assert_eq!(unpadded, "aGVsbG8");
+        assert_eq!(decode_base64_body(&unpadded), "hello");
+    }
+
+    #[test]
+    fn gmail_decode_base64_body_returns_empty_string_on_invalid_data() {
+        // The encoded input must never be shown as if it were the body.
+        assert_eq!(decode_base64_body("not base64!!"), "");
+    }
+
+    #[test]
+    fn gmail_decode_base64_bytes_accepts_unpadded_input() {
+        use base64::{engine::general_purpose, Engine as _};
+        let bytes = vec![0xffu8, 0xfe, 0x01];
+        let unpadded = general_purpose::URL_SAFE_NO_PAD.encode(&bytes);
+        assert_eq!(decode_base64_bytes(&unpadded).unwrap(), bytes);
+    }
+
+    #[test]
+    fn gmail_decode_base64_body_is_lossy_for_invalid_utf8() {
+        use base64::{engine::general_purpose, Engine as _};
+        let encoded = general_purpose::URL_SAFE.encode([0xffu8, 0x41]);
+        assert_eq!(decode_base64_body(&encoded), "\u{FFFD}A");
+    }
+
+    #[test]
+    fn gmail_decode_base64_bytes_round_trips_binary() {
+        use base64::{engine::general_purpose, Engine as _};
+        let bytes = vec![0u8, 1, 2, 250, 251, 252, 253, 254, 255];
+        let encoded = general_purpose::URL_SAFE.encode(&bytes);
+        assert_eq!(decode_base64_bytes(&encoded).unwrap(), bytes);
+        assert!(decode_base64_bytes("***").is_err());
+    }
+
+    // ----- dates -----
+
+    #[test]
+    fn gmail_parse_email_date_accepts_rfc2822() {
+        assert_eq!(parse_email_date("Tue, 1 Jul 2003 10:52:37 +0200"), Some(1_057_049_557));
+    }
+
+    #[test]
+    fn gmail_parse_email_date_accepts_rfc3339() {
+        assert_eq!(parse_email_date("2003-07-01T08:52:37Z"), Some(1_057_049_557));
+    }
+
+    #[test]
+    fn gmail_parse_email_date_rejects_garbage() {
+        assert_eq!(parse_email_date(""), None);
+        assert_eq!(parse_email_date("yesterday"), None);
+    }
+
+    // ----- hashing -----
+
+    #[test]
+    fn gmail_hash_message_id_is_deterministic_and_distinguishes_ids() {
+        assert_eq!(hash_message_id("abc"), hash_message_id("abc"));
+        assert_ne!(hash_message_id("abc"), hash_message_id("abd"));
+    }
+
+    // ----- header extraction / address parsing -----
+
+    #[test]
+    fn gmail_message_summary_parses_name_and_angle_bracket_address() {
+        let m = message(vec![
+            header("Subject", "Hello"),
+            header("From", "Jane Doe <jane@example.com>"),
+            header("Date", "2003-07-01T08:52:37Z"),
+        ]);
+        let s = message_to_email_summary(&m);
+        assert_eq!(s.subject, "Hello");
+        assert_eq!(s.from_address, "jane@example.com");
+        assert_eq!(s.from_name.as_deref(), Some("Jane Doe"));
+        assert_eq!(s.date, 1_057_049_557);
+        assert_eq!(s.message_id.as_deref(), Some("abc123"));
+        assert_eq!(s.uid, hash_message_id("abc123"));
+        assert_eq!(s.snippet.as_deref(), Some("snip"));
+        assert!(s.id.is_none());
+    }
+
+    #[test]
+    fn gmail_message_summary_bare_address_has_no_name() {
+        let s = message_to_email_summary(&message(vec![header("From", "bob@example.com")]));
+        assert_eq!(s.from_address, "bob@example.com");
+        assert_eq!(s.from_name, None);
+    }
+
+    #[test]
+    fn gmail_message_summary_angle_brackets_without_name() {
+        let s = message_to_email_summary(&message(vec![header("From", "<bob@example.com>")]));
+        assert_eq!(s.from_address, "bob@example.com");
+        assert_eq!(s.from_name, None);
+    }
+
+    #[test]
+    fn gmail_message_summary_quoted_name_is_unquoted() {
+        let s = message_to_email_summary(&message(vec![header("From", "\"Doe, Jane\" <jane@example.com>")]));
+        assert_eq!(s.from_address, "jane@example.com");
+        assert_eq!(s.from_name.as_deref(), Some("Doe, Jane"));
+    }
+
+    #[test]
+    fn gmail_message_summary_unclosed_angle_bracket_does_not_panic() {
+        let s = message_to_email_summary(&message(vec![header("From", "Jane <jane@example.com")]));
+        assert!(!s.from_address.is_empty());
+        assert!(s.from_address.contains("jane@example.com"), "{}", s.from_address);
+    }
+
+    #[test]
+    fn gmail_message_summary_malformed_from_with_reversed_brackets_does_not_panic() {
+        // `>` before the last `<` used to produce a reversed slice range and panic (L-1).
+        for raw in ["x> <attacker@example.com", "\"a>\" <b", "<", ">", "<>", "a>b<"] {
+            let s = message_to_email_summary(&message(vec![header("From", raw)]));
+            assert!(!s.from_address.is_empty() || raw.trim().is_empty(), "raw={:?}", raw);
+        }
+    }
+
+    #[test]
+    fn gmail_parse_from_header_handles_groups_and_multiple_mailboxes() {
+        assert_eq!(parse_from_header("a@x.com, b@y.com"), ("a@x.com".to_string(), None));
+        let (addr, name) = parse_from_header("Team: Alice <alice@x.com>, Bob <bob@x.com>;");
+        assert_eq!(addr, "alice@x.com");
+        assert_eq!(name.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn gmail_message_summary_missing_headers_yield_empty_strings_and_now_date() {
+        let before = chrono::Utc::now().timestamp();
+        let s = message_to_email_summary(&message(vec![]));
+        assert_eq!(s.subject, "");
+        assert_eq!(s.from_address, "");
+        assert!(s.date >= before);
+    }
+
+    #[test]
+    fn gmail_message_summary_header_names_are_case_sensitive() {
+        // Documents current behaviour: lowercase header names are ignored.
+        let s = message_to_email_summary(&message(vec![header("subject", "lower")]));
+        assert_eq!(s.subject, "");
+    }
+
+    // ----- MIME part selection -----
+
+    #[test]
+    fn gmail_extract_body_single_part_html() {
+        let payload = MessagePayload {
+            headers: vec![],
+            body: Some(body(Some(&b64url("<p>x</p>")), None, 0)),
+            parts: None,
+            mime_type: Some("text/html".to_string()),
+        };
+        assert_eq!(extract_body_from_payload(&payload), (Some("<p>x</p>".to_string()), None));
+    }
+
+    #[test]
+    fn gmail_extract_body_single_part_plain() {
+        let payload = MessagePayload {
+            headers: vec![],
+            body: Some(body(Some(&b64url("plain")), None, 0)),
+            parts: None,
+            mime_type: Some("text/plain".to_string()),
+        };
+        assert_eq!(extract_body_from_payload(&payload), (None, Some("plain".to_string())));
+    }
+
+    #[test]
+    fn gmail_extract_body_multipart_alternative_returns_both() {
+        let payload = MessagePayload {
+            headers: vec![],
+            body: None,
+            parts: Some(vec![part("text/plain", Some(&b64url("plain"))), part("text/html", Some(&b64url("<b>h</b>")))]),
+            mime_type: Some("multipart/alternative".to_string()),
+        };
+        assert_eq!(extract_body_from_payload(&payload), (Some("<b>h</b>".to_string()), Some("plain".to_string())));
+    }
+
+    #[test]
+    fn gmail_extract_body_recurses_into_nested_multipart() {
+        let inner = MessagePart {
+            mime_type: "multipart/alternative".to_string(),
+            filename: None,
+            body: None,
+            parts: Some(vec![part("text/plain", Some(&b64url("p"))), part("text/html", Some(&b64url("h")))]),
+        };
+        let payload = MessagePayload {
+            headers: vec![],
+            body: None,
+            parts: Some(vec![inner, part("application/pdf", Some(&b64url("ignored")))]),
+            mime_type: Some("multipart/mixed".to_string()),
+        };
+        assert_eq!(extract_body_from_payload(&payload), (Some("h".to_string()), Some("p".to_string())));
+    }
+
+    #[test]
+    fn gmail_extract_body_last_matching_part_wins() {
+        let payload = MessagePayload {
+            headers: vec![],
+            body: None,
+            parts: Some(vec![part("text/html", Some(&b64url("first"))), part("text/html", Some(&b64url("second")))]),
+            mime_type: None,
+        };
+        assert_eq!(extract_body_from_payload(&payload).0.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn gmail_extract_body_ignores_body_without_mime_type() {
+        let payload = MessagePayload {
+            headers: vec![],
+            body: Some(body(Some(&b64url("x")), None, 0)),
+            parts: None,
+            mime_type: None,
+        };
+        assert_eq!(extract_body_from_payload(&payload), (None, None));
+    }
+
+    // ----- attachments -----
+
+    #[test]
+    fn gmail_collect_attachments_requires_filename_and_attachment_id() {
+        let named = MessagePart {
+            mime_type: "application/pdf".to_string(),
+            filename: Some("doc.pdf".to_string()),
+            body: Some(body(None, Some("att-1"), 1234)),
+            parts: None,
+        };
+        let empty_name = MessagePart {
+            mime_type: "image/png".to_string(),
+            filename: Some(String::new()),
+            body: Some(body(None, Some("att-2"), 10)),
+            parts: None,
+        };
+        let no_attachment_id = MessagePart {
+            mime_type: "image/png".to_string(),
+            filename: Some("inline.png".to_string()),
+            body: Some(body(Some("AAAA"), None, 10)),
+            parts: None,
+        };
+        let nested = MessagePart {
+            mime_type: "multipart/mixed".to_string(),
+            filename: None,
+            body: None,
+            parts: Some(vec![MessagePart {
+                mime_type: "text/csv".to_string(),
+                filename: Some("data.csv".to_string()),
+                body: Some(body(None, Some("att-3"), 5)),
+                parts: None,
+            }]),
+        };
+        let payload = MessagePayload {
+            headers: vec![],
+            body: None,
+            parts: Some(vec![named, empty_name, no_attachment_id, nested]),
+            mime_type: None,
+        };
+
+        let attachments = extract_attachments_from_payload(&payload);
+        let ids: Vec<&str> = attachments.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, vec!["att-1", "att-3"]);
+        assert_eq!(attachments[0].filename, "doc.pdf");
+        assert_eq!(attachments[0].mime_type, "application/pdf");
+        assert_eq!(attachments[0].size, 1234);
+    }
+
+    #[test]
+    fn gmail_extract_attachments_with_no_parts_is_empty() {
+        let payload = MessagePayload { headers: vec![], body: None, parts: None, mime_type: None };
+        assert!(extract_attachments_from_payload(&payload).is_empty());
+    }
+
+    // ----- outgoing message -----
+
+    #[test]
+    fn gmail_build_rfc2822_message_has_crlf_headers_and_blank_line_before_body() {
+        let msg = build_rfc2822_message("me", "to@example.com", "Subj", "Body line", None).unwrap();
+        assert_eq!(
+            msg,
+            "From: me\r\nTo: to@example.com\r\nSubject: Subj\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nBody line"
+        );
+    }
+
+    #[test]
+    fn gmail_build_rfc2822_message_adds_reply_headers() {
+        let msg = build_rfc2822_message("me", "to@example.com", "Re: x", "b", Some("<orig@id>")).unwrap();
+        assert!(msg.contains("In-Reply-To: <orig@id>\r\n"));
+        assert!(msg.contains("References: <orig@id>\r\n"));
+        assert!(msg.ends_with("\r\n\r\nb"));
+    }
+
+    #[test]
+    fn gmail_build_rfc2822_message_rejects_header_injection() {
+        let err = build_rfc2822_message("me", "a@b.c\r\nBcc: x@y.z", "s", "b", None).unwrap_err();
+        assert_eq!(err.header_name, "To");
+        assert!(build_rfc2822_message("me", "a@b.c", "s\nBcc: x", "b", None).is_err());
+        assert!(build_rfc2822_message("me", "a@b.c", "s", "b", Some("<id>\r\nBcc: x")).is_err());
+        // Line breaks in the body are fine.
+        assert!(build_rfc2822_message("me", "a@b.c", "s", "line1\r\nline2", None).is_ok());
+    }
+
+    #[test]
+    fn gmail_build_rfc2822_message_encodes_non_ascii_subject() {
+        use base64::{engine::general_purpose, Engine as _};
+        let msg = build_rfc2822_message("me", "a@b.c", "Grüße ✓", "b", None).unwrap();
+        assert!(msg.is_ascii(), "headers must be 7-bit: {}", msg);
+        let expected = format!("Subject: =?UTF-8?B?{}?=\r\n", general_purpose::STANDARD.encode("Grüße ✓".as_bytes()));
+        assert!(msg.contains(&expected), "{}", msg);
+    }
+
+    #[test]
+    fn gmail_validate_header_value_rejects_cr_and_lf_only() {
+        assert!(validate_header_value("To", "ok <a@b.c>").is_ok());
+        assert!(validate_header_value("To", "a\rb").is_err());
+        assert!(validate_header_value("To", "a\nb").is_err());
+        assert_eq!(
+            validate_header_value("Subject", "x\r\n").unwrap_err().to_string(),
+            "Subject header must not contain line breaks"
+        );
+    }
+
+    #[test]
+    fn gmail_encode_header_value_rfc2047_leaves_ascii_untouched() {
+        assert_eq!(encode_header_value_rfc2047("Plain subject"), "Plain subject");
+        assert_eq!(encode_header_value_rfc2047(""), "");
+    }
+
+    #[test]
+    fn gmail_encode_header_value_rfc2047_encodes_and_round_trips() {
+        use base64::{engine::general_purpose, Engine as _};
+        let encoded = encode_header_value_rfc2047("Grüße");
+        assert_eq!(encoded, format!("=?UTF-8?B?{}?=", general_purpose::STANDARD.encode("Grüße".as_bytes())));
+
+        // Long subjects are split into several encoded-words of at most 75 chars,
+        // each decoding to a valid UTF-8 fragment.
+        let long = "日本語のテキスト".repeat(10);
+        let encoded = encode_header_value_rfc2047(&long);
+        let mut decoded = String::new();
+        for word in encoded.split(' ') {
+            assert!(word.len() <= 75, "encoded-word too long: {}", word);
+            let inner = word.strip_prefix("=?UTF-8?B?").unwrap().strip_suffix("?=").unwrap();
+            decoded.push_str(std::str::from_utf8(&general_purpose::STANDARD.decode(inner).unwrap()).unwrap());
+        }
+        assert_eq!(decoded, long);
+    }
+
+    #[test]
+    fn gmail_get_display_name_maps_system_labels_and_passes_through_others() {
+        assert_eq!(get_display_name("INBOX"), "Inbox");
+        assert_eq!(get_display_name("DRAFT"), "Drafts");
+        assert_eq!(get_display_name("TRASH"), "Trash");
+        assert_eq!(get_display_name("Label_42"), "Label_42");
     }
 }

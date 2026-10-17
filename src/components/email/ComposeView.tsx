@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useTabStore } from '../../store/tabStore';
 import { getAccountColor, extractAccountId } from '../../utils/accountColors';
 import { CustomSelect } from '../ui/CustomSelect';
+import { formatQuotedReply } from '../../utils/formatQuotedReply';
 
 interface Account {
   id: string;
@@ -32,20 +33,6 @@ function accountSelectOptions(accounts: Account[]): import('../ui/CustomSelect')
       color: accColor ?? undefined,
     };
   });
-}
-
-function formatQuotedReply(quotedBody: string, fromName: string, date?: number): string {
-  const dateStr = date
-    ? new Date(date * 1000).toLocaleString()
-    : '';
-  const header = dateStr
-    ? `On ${dateStr}, ${fromName} wrote:`
-    : `${fromName} wrote:`;
-  const quoted = quotedBody
-    .split('\n')
-    .map((line) => `> ${line}`)
-    .join('\n');
-  return `\n\n${header}\n${quoted}`;
 }
 
 export function ComposeView({ tabId, accountEmail, replyTo, replySubject, inReplyTo, replyQuotedBody, replyFromName, replyDate }: ComposeViewProps) {

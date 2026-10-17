@@ -1,9 +1,37 @@
+import { useEffect, useRef } from 'react';
+import type { WheelEvent } from 'react';
 import { Tab } from './Tab';
 import { useTabStore } from '../../store/tabStore';
 import type { AccountTab } from '../../types/tabs';
+import { shouldMapWheelToHorizontalScroll } from '../../utils/tabStripScroll';
+
+/**
+ * Hides the native scrollbar (which, as a macOS overlay, paints over the
+ * 42px strip and blocks clicks until it fades) while keeping the strip
+ * scrollable via wheel, trackpad and keyboard.
+ */
+const HIDDEN_SCROLLBAR_CLASSES = '[scrollbar-width:none] [&::-webkit-scrollbar]:hidden';
 
 export function TabBar() {
   const { tabs, activeTabId, setActiveTab, closeAndFocusPrevious, addComposeTab, openSettingsTab } = useTabStore();
+  const stripRef = useRef<HTMLDivElement>(null);
+
+  // Keep the active tab visible when it changes (e.g. opened at the far right).
+  useEffect(() => {
+    const strip = stripRef.current;
+    if (!strip) return;
+    const activeTabElement = strip.querySelector<HTMLElement>(`[data-tab-id="${CSS.escape(activeTabId)}"]`);
+    activeTabElement?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+  }, [activeTabId]);
+
+  // A mouse wheel only produces vertical deltas; translate them into
+  // horizontal scrolling. Trackpad horizontal gestures pass through untouched.
+  const handleWheel = (event: WheelEvent<HTMLDivElement>) => {
+    const strip = stripRef.current;
+    if (!strip || !shouldMapWheelToHorizontalScroll(event.deltaX, event.deltaY)) return;
+    event.preventDefault();
+    strip.scrollLeft += event.deltaY;
+  };
 
   const handleCompose = () => {
     const activeTab = tabs.find((t) => t.id === activeTabId);
@@ -18,7 +46,11 @@ export function TabBar() {
   };
 
   return (
-    <div className="flex items-end bg-gray-100 dark:bg-gray-900 pt-2 px-3 border-b-2 border-white dark:border-gray-800 overflow-x-auto overflow-y-hidden min-h-[42px]">
+    <div
+      ref={stripRef}
+      onWheel={handleWheel}
+      className={`flex items-end bg-gray-100 dark:bg-gray-900 pt-2 px-3 border-b-2 border-white dark:border-gray-800 overflow-x-auto overflow-y-hidden min-h-[42px] ${HIDDEN_SCROLLBAR_CLASSES}`}
+    >
       <div className="flex items-end gap-0.5 flex-1">
         {tabs.map((tab) => (
           <Tab

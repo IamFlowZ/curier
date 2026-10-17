@@ -10,6 +10,7 @@ import {
 import { useTabStore } from '../../store/tabStore';
 import { FeedSettingsContent } from '../feeds/FeedSettingsPanel';
 import { estimateAllTabsMemory, getStaleTabs } from '../../utils/memoryEstimator';
+import { formatByteSize } from '../../utils/formatByteSize';
 import { AddAccountModal } from '../account/AddAccountModal';
 import { CustomSelect } from '../ui/CustomSelect';
 import type { ThemePreference } from '../../hooks/useTheme';
@@ -47,14 +48,6 @@ interface SettingsPageProps {
   initialTab?: SettingsTab;
   memoryInfo?: MemoryInfo | null;
   onLogout?: (email?: string) => void;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  const k = 1024;
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${(bytes / Math.pow(k, i)).toFixed(1)} ${units[i]}`;
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -758,7 +751,7 @@ function ResourcesTab({
             </div>
             <div className="flex justify-between">
               <span>Database size</span>
-              <span className="font-medium text-gray-900 dark:text-gray-100">{formatBytes(cacheStats.db_size_bytes)}</span>
+              <span className="font-medium text-gray-900 dark:text-gray-100">{formatByteSize(cacheStats.db_size_bytes)}</span>
             </div>
           </div>
         ) : (

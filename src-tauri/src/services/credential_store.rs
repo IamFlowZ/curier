@@ -239,47 +239,4 @@ impl CredentialStore {
         debug!("CREDENTIAL_STORE: Loaded {} accounts", result.len());
         Ok(result)
     }
-
-    pub fn clear_all(&self) -> Result<()> {
-        debug!("CREDENTIAL_STORE: Clearing all credentials");
-
-        let entry = Self::entry()?;
-        match entry.delete_credential() {
-            Ok(()) => {}
-            Err(keyring::Error::NoEntry) => {}
-            Err(e) => return Err(anyhow::anyhow!("Failed to clear keychain entry: {}", e)),
-        }
-
-        let mut guard = cache().lock().unwrap();
-        guard.credentials = Some(HashMap::new());
-        guard.dirty = false;
-
-        debug!("CREDENTIAL_STORE: All credentials cleared");
-        Ok(())
-    }
-
-    pub fn update_account_tokens(
-        &self,
-        email: &str,
-        access_token: String,
-        refresh_token: Option<String>,
-        expires_at: i64,
-    ) -> Result<()> {
-        debug!("CREDENTIAL_STORE: Updating tokens for: {}", email);
-
-        let mut all_credentials = self.load_all_credentials()?;
-
-        if let Some(creds) = all_credentials.get_mut(email) {
-            creds.access_token = access_token;
-            if let Some(rt) = refresh_token {
-                creds.refresh_token = Some(rt);
-            }
-            creds.expires_at = expires_at;
-            self.save_all_credentials(&all_credentials)?;
-            debug!("CREDENTIAL_STORE: Successfully updated tokens for: {}", email);
-            Ok(())
-        } else {
-            anyhow::bail!("Account not found: {}", email)
-        }
-    }
 }
