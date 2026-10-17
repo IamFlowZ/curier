@@ -231,16 +231,26 @@ export interface IframeDocumentOptions extends IframeContentSecurityPolicyOption
  * Includes the per-iframe CSP `<meta>` and a base dark-mode stylesheet when
  * `isDarkMode` is true.
  */
+/** Background used for email content in dark mode when the message declares none. */
+export const DARK_MODE_EMAIL_CARD_BACKGROUND = '#ffffff';
+/** Default text color on the dark-mode email card. */
+export const DARK_MODE_EMAIL_CARD_TEXT = '#111827';
+
 export function buildIframeDocument(bodyHtml: string, options: IframeDocumentOptions): string {
   const contentSecurityPolicy = buildIframeContentSecurityPolicy(options);
   const darkModeStyles = options.isDarkMode
     ? `
       <style>
+        /* Email HTML almost always assumes a light background. When the message
+           does not declare one, render it on a light card so dark inline text
+           stays readable instead of disappearing into the app's dark theme. */
         body:not([style*="background"]) {
-          color-scheme: dark;
-          color: #e5e7eb;
+          color-scheme: light;
+          background: ${DARK_MODE_EMAIL_CARD_BACKGROUND};
+          color: ${DARK_MODE_EMAIL_CARD_TEXT};
+          padding: 16px;
+          border-radius: 8px;
         }
-        a { color: #60a5fa; }
       </style>`
     : '';
 

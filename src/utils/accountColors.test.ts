@@ -10,6 +10,7 @@ import {
   getEmailListRowColor,
   loadAccountColors,
   setAccountColorConfig,
+  NEUTRAL_ROW_BACKGROUND,
 } from './accountColors';
 
 const HEX_COLOR_PATTERN = /^#[0-9a-f]{6}$/;
@@ -145,12 +146,12 @@ describe('accountColors', () => {
     });
 
     it('returns white when there is no account id', () => {
-      expect(getEmailListRowColor(null, 0, UNREAD)).toBe('white');
+      expect(getEmailListRowColor(null, 0, UNREAD)).toBe(NEUTRAL_ROW_BACKGROUND);
     });
 
     it('returns white for read emails on even rows', () => {
-      expect(getEmailListRowColor(ACCOUNT_A, 0, READ)).toBe('white');
-      expect(getEmailListRowColor(ACCOUNT_A, 2, READ)).toBe('white');
+      expect(getEmailListRowColor(ACCOUNT_A, 0, READ)).toBe(NEUTRAL_ROW_BACKGROUND);
+      expect(getEmailListRowColor(ACCOUNT_A, 2, READ)).toBe(NEUTRAL_ROW_BACKGROUND);
     });
 
     it('uses a 3% tint for read emails on odd rows', () => {

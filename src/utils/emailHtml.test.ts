@@ -15,6 +15,7 @@ import {
   extractHostname,
   isDomainApproved,
   linkifyPlainText,
+  DARK_MODE_EMAIL_CARD_BACKGROUND,
 } from './emailHtml';
 
 const TAURI_CONFIG_PATH = resolve(__dirname, '../../src-tauri/tauri.conf.json');
@@ -236,8 +237,9 @@ describe('iframe Content-Security-Policy', () => {
       const document = buildIframeDocument('<p>body</p>', { isDarkMode: true, allowAllRemoteImages: false });
       expect(document).toContain('<body><p>body</p>');
       expect(document).toContain(`<script>${IFRAME_BRIDGE_SCRIPT}</script>`);
-      expect(document).toContain('color-scheme: dark');
-      expect(buildIframeDocument('', { isDarkMode: false, allowAllRemoteImages: false })).not.toContain('color-scheme: dark');
+      expect(document).toContain(`background: ${DARK_MODE_EMAIL_CARD_BACKGROUND}`);
+      expect(document).toContain('body:not([style*="background"])');
+      expect(buildIframeDocument('', { isDarkMode: false, allowAllRemoteImages: false })).not.toContain(DARK_MODE_EMAIL_CARD_BACKGROUND);
     });
   });
 

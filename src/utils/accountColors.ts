@@ -108,26 +108,29 @@ export function getAccountColorLight(accountId: string | null | undefined, opaci
 /**
  * Calculates the background color for an email list row with zebra striping
  */
+/** Row background that inherits the list background in both light and dark themes. */
+export const NEUTRAL_ROW_BACKGROUND = 'transparent';
+
 export function getEmailListRowColor(
   accountId: string | null | undefined,
   index: number,
   isRead: boolean
 ): string {
-  if (!accountId) return 'white';
+  if (!accountId) return NEUTRAL_ROW_BACKGROUND;
 
   const isEven = index % 2 === 0;
 
   // Opacity levels for striping
   let opacity: number;
   if (isRead) {
-    opacity = isEven ? 0 : 0.03; // Read: even = white, odd = 3%
+    opacity = isEven ? 0 : 0.03; // Read: even = neutral, odd = 3%
   } else {
     opacity = isEven ? 0.06 : 0.09; // Unread: even = 6%, odd = 9%
   }
 
-  if (opacity === 0) return 'white';
+  if (opacity === 0) return NEUTRAL_ROW_BACKGROUND;
 
-  return getAccountColorLight(accountId, opacity) || 'white';
+  return getAccountColorLight(accountId, opacity) || NEUTRAL_ROW_BACKGROUND;
 }
 
 /**
