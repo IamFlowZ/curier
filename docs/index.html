@@ -5,9 +5,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Curier</title>
   <meta name="description" content="Curier is a small, open-source email client for macOS that turns your inbox into a feed. Built with Tauri, Rust, and React." />
-  <meta property="og:title" content="Curier" />
-  <meta property="og:description" content="A small, open-source email client for macOS that turns your inbox into a feed." />
+  <meta property="og:title" content="Curier: your inbox, as a feed" />
+  <meta property="og:description" content="A small, open-source email client for macOS that turns your inbox into a feed. Built with Tauri, Rust, and React." />
   <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Curier" />
+  <meta property="og:url" content="https://iamflowz.github.io/curier/" />
+  <meta property="og:image" content="https://iamflowz.github.io/curier/social-card.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="Curier logo and tagline next to a screenshot of the feeds view" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Curier: your inbox, as a feed" />
+  <meta name="twitter:description" content="A small, open-source email client for macOS that turns your inbox into a feed. Built with Tauri, Rust, and React." />
+  <meta name="twitter:image" content="https://iamflowz.github.io/curier/social-card.png" />
+  <link rel="canonical" href="https://iamflowz.github.io/curier/" />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Crect x='4' y='4' width='88' height='88' rx='20' fill='%230891b2'/%3E%3Cpath d='M22 34 L48 54 L74 34' fill='none' stroke='%23fff' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'/%3E%3Crect x='22' y='34' width='52' height='34' rx='4' fill='none' stroke='%23fff' stroke-width='3.5'/%3E%3Cpath d='M54 51 L68 51 M62 45 L68 51 L62 57' fill='none' stroke='%23fff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
   <style>
     :root {
@@ -107,6 +118,10 @@
     code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     p code { background: var(--bg-elevated); border: 1px solid var(--border); padding: 1px 6px; border-radius: 6px; font-size: 0.92em; }
 
+    .faq { display: grid; gap: 22px; max-width: 760px; }
+    .faq h3 { margin: 0 0 6px; font-size: 17px; }
+    .faq p { margin: 0; color: var(--text-muted); font-size: 15px; }
+
     footer { padding: 32px 0 48px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 14px; text-align: center; }
     footer a { color: inherit; }
   </style>
@@ -127,6 +142,7 @@
         <a href="#features">Features</a>
         <a href="#privacy">Privacy</a>
         <a href="#install">Install</a>
+        <a href="#faq">FAQ</a>
         <a href="https://github.com/IamFlowZ/curier">GitHub</a>
       </nav>
     </header>
@@ -241,6 +257,41 @@
         <p style="margin-top: 24px; color: var(--text-muted);">
           Prefer to build it yourself? Clone the repo and run <code>npm install</code> then <code>npm run tauri build</code>. You will need Node and Rust.
         </p>
+      </section>
+
+      <section id="faq">
+        <h2>Questions you will probably have</h2>
+        <p class="sub">The honest answers, so you can decide whether this is for you before downloading anything.</p>
+        <div class="faq">
+          <div>
+            <h3>Why do I have to create my own Google OAuth credentials?</h3>
+            <p>Reading Gmail is a restricted scope. For Google to let one shared app do it, the developer has to pass a paid third-party security assessment every year. There is no budget for that, so instead you create a free Google Cloud project, which gives you a client ID that only your copy of Curier uses. It takes about ten minutes with the <a href="https://github.com/IamFlowZ/curier/blob/main/docs/GMAIL_SETUP.md">setup guide</a>, and it means no one but you ever holds a credential to your mailbox.</p>
+          </div>
+          <div>
+            <h3>Why does macOS say the app is damaged?</h3>
+            <p>Builds are signed ad hoc but not notarized, which needs a paid Apple developer account. Gatekeeper reports un-notarized downloads as damaged. The app is fine; the <a href="#install">install step</a> clears the quarantine flag once and it opens normally after that. If you would rather not trust a binary, build it from source.</p>
+          </div>
+          <div>
+            <h3>How much memory does it really use?</h3>
+            <p>The Rust process is small, but the window is a native WebView that behaves like a browser tab, so expect the whole thing to sit somewhere around 100 to 200&nbsp;MB depending on how many tabs are open. Lighter than most Electron mail clients, not magic.</p>
+          </div>
+          <div>
+            <h3>What leaves my Mac?</h3>
+            <p>Only the requests Curier makes directly to Gmail on your behalf. There is no Curier server, no telemetry, no crash reporting, and no update check. Remote images in HTML email are blocked by default.</p>
+          </div>
+          <div>
+            <h3>Was this code written by AI?</h3>
+            <p>Yes, nearly all of it, directed by a developer who uses the app daily. Before release it was given a unit test suite covering the Rust and TypeScript sides and a security review whose findings were fixed. The <a href="https://github.com/IamFlowZ/curier#foreword">README foreword</a> explains the project's origin and what it is and is not trying to be.</p>
+          </div>
+          <div>
+            <h3>Does it work with Outlook, iCloud, or IMAP?</h3>
+            <p>Gmail only right now. Microsoft 365 support is partly built and not finished. Plain IMAP is not on the roadmap.</p>
+          </div>
+          <div>
+            <h3>Is it maintained?</h3>
+            <p>It is used every day, so bugs that affect daily use get fixed. There is no release schedule and no promise of support. Issues and pull requests are read, and correct fixes get merged.</p>
+          </div>
+        </div>
       </section>
     </main>
 
